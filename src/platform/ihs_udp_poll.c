@@ -91,14 +91,35 @@ static void LossLog(const char *what, const uint8_t *data, ssize_t len) {
                 data[0] & 0x7f, data[1], data[4], (int16_t) (data[5] | data[6] << 8), data[7] | data[8] << 8);
 }
 
+/* Recently dropped packets (channel, fragment and packet id), to notice when one comes back.
+ * FEC shards of one message share the packet id and differ in the fragment id. */
+#define LOSS_RECENT 64
+static __thread uint64_t lossRecent[LOSS_RECENT];
+static __thread unsigned lossRecentCount;
+
 static bool LossDrop(const uint8_t *data, ssize_t len) {
     pthread_once(&lossOnce, LossInit);
-    if (lossPercent <= 0) return false;
-    /* Session packets only: discovery datagrams start with 0xff, and type 127 doesn't exist. */
-    if (len >= 13 && (data[0] & 0x7f) < 16 && data[1] > 0) LossLog("retransmitted", data, len);
+    if (lossPercent <= 0 || len < 13) return false;
+    unsigned type = data[0] & 0x7f;
+    /* Session packets only: discovery datagrams start with 0xff. */
+    if (type >= 16) return false;
+    static __thread uint16_t seenTypes;
+    if (type > 10 && !(seenTypes & (1u << type))) {
+        seenTypes |= (uint16_t) (1u << type);
+        LossLog("first packet of an unknown type", data, len);
+    }
+    uint64_t key = (uint64_t) data[4] << 32 | (uint64_t) (data[5] | data[6] << 8) << 16 | (uint64_t) (data[7] | data[8] << 8);
+    for (unsigned i = 0; i < LOSS_RECENT && i < lossRecentCount; i++) {
+        if (lossRecent[i] == key && type != 7 && type != 8) {
+            lossRecent[i] = UINT64_MAX;
+            LossLog("dropped earlier, arrived again", data, len);
+        }
+    }
+    if (data[1] > 0) LossLog("retransmitted", data, len);
     if (len < LOSS_MIN_BYTES) return false;
     static __thread unsigned seed = 1;
     if (rand_r(&seed) >= lossPercent / 100.0 * RAND_MAX) return false;
+    lossRecent[lossRecentCount++ % LOSS_RECENT] = key;
     LossLog("dropped", data, len);
     return true;
 }

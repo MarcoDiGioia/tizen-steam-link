@@ -62,6 +62,7 @@ add_library(ihslib STATIC
         ${IHS_DIR}/src/session/channels/video/frame_h264.c
         ${IHS_DIR}/src/session/channels/video/frame_hevc.c
         ${IHS_DIR}/src/session/channels/video/partial_frames.c
+        ${IHS_DIR}/src/session/fec.c
         ${CMAKE_CURRENT_LIST_DIR}/../src/platform/ihs_thread_pthread.c
         ${CMAKE_CURRENT_LIST_DIR}/../src/platform/ihs_udp_poll.c)
 

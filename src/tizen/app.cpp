@@ -272,7 +272,12 @@ public:
                ",\"videoAppended\":" + std::to_string(c.videoAppended) + ",\"videoFailed\":" +
                std::to_string(c.videoFailed) + ",\"audioAppended\":" + std::to_string(c.audioAppended) +
                ",\"audioFailed\":" + std::to_string(c.audioFailed) + ",\"silenceFilled\":" +
-               std::to_string(c.silenceFilled) + ",\"audioDropped\":" + std::to_string(c.audioDropped) + "}";
+               std::to_string(c.silenceFilled) + ",\"audioDropped\":" + std::to_string(c.audioDropped) +
+               ",\"videoPackets\":" + std::to_string(s.videoPackets) + ",\"videoPacketsLost\":" +
+               std::to_string(s.videoPacketsLost) + ",\"lostReports\":" + std::to_string(s.lostReports) +
+               ",\"roundTripMs\":" + std::to_string(s.roundTripMs) + ",\"fec\":" + (s.fec ? "true" : "false") +
+               ",\"fecRecovered\":" + std::to_string(s.fecRecovered) + ",\"fecUnrecoverable\":" +
+               std::to_string(s.fecUnrecoverable) + "}";
     }
 
     // Client::Listener (ihslib client thread)
@@ -537,8 +542,10 @@ bool Probe(const std::string &ip) { return g_app->Probe(ip); }
 bool Pair(const std::string &ip, const std::string &pin) { return g_app->Pair(ip, pin); }
 void CancelPair() { g_app->CancelPair(); }
 
+// quality: Steam's preference (-1 automatic, 1 fast, 2 balanced, 3 beautiful). bitrateKbps: -1 lets
+// Steam decide.
 bool StartStream(const std::string &ip, const std::string &steamId, const std::string &keyHex, int maxWidth,
-                 int maxHeight, bool hevc, bool audio, bool bigPicture) {
+                 int maxHeight, bool hevc, bool audio, bool bigPicture, int quality, int bitrateKbps) {
     StreamParams params;
     params.ip = ip;
     params.steamId = std::strtoull(steamId.c_str(), nullptr, 10);
@@ -548,6 +555,8 @@ bool StartStream(const std::string &ip, const std::string &steamId, const std::s
     params.request.interface = bigPicture ? IHS_StreamInterfaceBigPicture : IHS_StreamInterfaceDefault;
     params.options.hevc = hevc;
     params.options.audio = audio;
+    params.options.quality = quality;
+    params.options.bitrateKbps = bitrateKbps;
     return g_app->StartStream(params);
 }
 

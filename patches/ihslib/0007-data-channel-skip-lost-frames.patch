@@ -1,0 +1,107 @@
+Skip a lost frame as soon as a later one is complete.
+
+Patch 0006 made the data worker give up on an incomplete frame once it was 200 ms older than
+the newest packet. Unreliable packets are never resent, so once a later frame has all its
+packets the one before it is lost for good, and those 200 ms only delay the keyframe request:
+the video stalled that long on every lost packet. Steam's own client acts on the gap right
+away ("Got video sequence %d, expected %d, sending lost data notification").
+
+IHS_SessionPacketsWindowSkipLost drops the slots before the first later frame that is
+complete, and the data worker calls it whenever the head frame can't be polled. The video
+channel then sees the sequence gap and asks for a keyframe. The 200 ms discard stays for a
+frame with nothing complete after it.
+
+diff --git a/src/session/channels/ch_data.c b/src/session/channels/ch_data.c
+index a4bb728..8df18b2 100644
+--- a/src/session/channels/ch_data.c
++++ b/src/session/channels/ch_data.c
+@@ -140,6 +140,17 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
+                                discarded);
+             }
+             hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame);
++            if (!hasFrame) {
++                // A later frame is already complete: the head frame lost a packet, and only the
++                // next keyframe can repair the picture. Move on now, as Steam's own client does,
++                // so the video channel sees the gap and asks for one.
++                uint16_t skipped = IHS_SessionPacketsWindowSkipLost(channel->window);
++                if (skipped > 0) {
++                    IHS_SessionLog(channel->base.session, IHS_LogLevelDebug, channelName,
++                                   "Skipped %u packets of a lost frame", skipped);
++                    hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame);
++                }
++            }
+             if (hasFrame || channel->interrupted) {
+                 break;
+             }
+diff --git a/src/session/window.c b/src/session/window.c
+index b3783be..c50ac99 100644
+--- a/src/session/window.c
++++ b/src/session/window.c
+@@ -221,6 +221,48 @@ void IHS_SessionPacketsWindowReset(IHS_SessionPacketsWindow *window) {
+     window->tail.id = 0;
+ }
+ 
++/* True if the frame starting at pos (unwrapped) has all its packets within the next `size` slots. */
++static bool FrameCompleteAt(const IHS_SessionPacketsWindow *window, int pos, uint16_t size) {
++    const IHS_SessionWindowItem *head = &window->data[pos % window->capacity];
++    if (!FrameItemIsUsed(head) || !FrameItemIsHead(head)) {
++        return false;
++    }
++    int packetsCount = 1 + head->header.fragmentId;
++    if (packetsCount > size) {
++        return false;
++    }
++    for (int i = 1; i < packetsCount; i++) {
++        if (!FrameItemIsUsed(&window->data[(pos + i) % window->capacity])) {
++            return false;
++        }
++    }
++    return true;
++}
++
++uint16_t IHS_SessionPacketsWindowSkipLost(IHS_SessionPacketsWindow *window) {
++    uint16_t size = IHS_SessionPacketsWindowSize(window);
++    if (size == 0 || FrameCompleteAt(window, window->head.pos, size)) {
++        return 0;
++    }
++    for (uint16_t offset = 1; offset < size; offset++) {
++        if (!FrameCompleteAt(window, window->head.pos + offset, (uint16_t) (size - offset))) {
++            continue;
++        }
++        for (uint16_t i = 0; i < offset; i++) {
++            IHS_SessionWindowItem *item = &window->data[(window->head.pos + i) % window->capacity];
++            if (FrameItemIsUsed(item)) {
++                FrameItemRecycle(item);
++            }
++        }
++        window->head.pos = window->head.pos + offset;
++        if (window->head.pos > window->capacity) {
++            window->head.pos = window->head.pos % window->capacity;
++        }
++        return offset;
++    }
++    return 0;
++}
++
+ void IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *frame) {
+     IHS_SessionFrameClear(frame, false);
+ }
+diff --git a/src/session/window.h b/src/session/window.h
+index 4089d61..049b2c5 100644
+--- a/src/session/window.h
++++ b/src/session/window.h
+@@ -65,6 +65,14 @@ bool IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window
+  */
+ void IHS_SessionPacketsWindowReset(IHS_SessionPacketsWindow *window);
+ 
++/**
++ * If the frame at the head can't be polled but a later frame has all its packets, drop everything
++ * before that later frame. For unreliable data only: a missing packet is never resent, so once a
++ * later frame is complete the head frame is lost, and waiting for it only holds up the rest.
++ * @return number of slots dropped, 0 if nothing was
++ */
++uint16_t IHS_SessionPacketsWindowSkipLost(IHS_SessionPacketsWindow *window);
++
+ void IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *frame);
+ 
+ uint16_t IHS_SessionPacketsWindowAvailable(const IHS_SessionPacketsWindow *window);

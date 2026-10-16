@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -27,6 +28,7 @@ extern "C" {
 #include "ihs_buffer.h"
 #include "ihs_enumeration.h"
 #include "protobuf/discovery.pb-c.h"
+#include "session/fec.h"
 #include "session/window.h"
 }
 
@@ -548,6 +550,146 @@ void TestPacketWindowDiscardAndReset() {
     IHS_SessionPacketsWindowDestroy(window);
 }
 
+void TestPacketWindowSkipLost() {
+    IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(32);
+    CHECK(AddPacket(window, 0, 0, 2));  // frame 0: packets 0, 1, 2; 1 is lost
+    CHECK(AddPacket(window, 2, 0, 0, true));
+    CHECK_EQ(IHS_SessionPacketsWindowSkipLost(window), 0);  // nothing complete after it yet
+    CHECK(AddPacket(window, 3, 20, 1));  // frame 3: packets 3, 4
+    CHECK_EQ(IHS_SessionPacketsWindowSkipLost(window), 0);  // frame 3 isn't complete either
+    CHECK(AddPacket(window, 4, 20, 0, true));
+    CHECK_EQ(IHS_SessionPacketsWindowSkipLost(window), 3);  // drops slots 0..2
+    CHECK_EQ(PollFrame(window), 3);
+    CHECK(AddPacket(window, 5, 40));
+    CHECK_EQ(IHS_SessionPacketsWindowSkipLost(window), 0);  // head is complete: nothing to skip
+    CHECK_EQ(PollFrame(window), 5);
+    IHS_SessionPacketsWindowDestroy(window);
+}
+
+// Steam's video FEC (session/fec.h), encoded here independently: parity row r is the sum of
+// d_i / (r ^ (m + i)) over GF(2^8) with polynomial 0x11d.
+struct Gf {
+    uint8_t exp[512], log[256];
+    Gf() {
+        unsigned x = 1;
+        for (int i = 0; i < 255; i++) {
+            exp[i] = static_cast<uint8_t>(x);
+            log[x] = static_cast<uint8_t>(i);
+            x <<= 1;
+            if (x & 0x100) x ^= 0x11d;
+        }
+        for (int i = 255; i < 512; i++) exp[i] = exp[i - 255];
+    }
+    uint8_t Mul(uint8_t a, uint8_t b) const { return a && b ? exp[log[a] + log[b]] : 0; }
+    uint8_t Inv(uint8_t a) const { return exp[255 - log[a]]; }
+};
+
+std::vector<std::vector<uint8_t>> FecShards(const std::vector<uint8_t> &message, uint16_t shardSize, uint16_t m) {
+    static const Gf gf;
+    size_t k = (message.size() + shardSize - 1) / shardSize;
+    std::vector<std::vector<uint8_t>> shards(k + m, std::vector<uint8_t>(shardSize, 0));
+    for (size_t i = 0; i < k; i++) {
+        size_t n = std::min<size_t>(shardSize, message.size() - i * shardSize);
+        std::memcpy(shards[i].data(), message.data() + i * shardSize, n);
+    }
+    for (size_t r = 0; r < m; r++) {
+        for (size_t i = 0; i < k; i++) {
+            uint8_t c = gf.Inv(static_cast<uint8_t>(r ^ (m + i)));
+            for (size_t j = 0; j < shardSize; j++) shards[k + r][j] ^= gf.Mul(c, shards[i][j]);
+        }
+    }
+    for (auto &shard : shards) {
+        uint8_t header[8];
+        uint32_t len = static_cast<uint32_t>(message.size());
+        std::memcpy(header, &len, 4);
+        std::memcpy(header + 4, &shardSize, 2);
+        std::memcpy(header + 6, &m, 2);
+        shard.insert(shard.begin(), header, header + 8);
+    }
+    return shards;
+}
+
+// Feeds one shard; returns the message if it completed one.
+std::vector<uint8_t> FecAdd(IHS_SessionFEC *fec, uint16_t id, int index, const std::vector<uint8_t> &shard,
+                            bool *complete) {
+    IHS_SessionPacket packet{};
+    packet.header.type = IHS_SessionPacketTypeUnreliableFEC;
+    packet.header.packetId = id;
+    packet.header.fragmentId = static_cast<int16_t>(index);
+    IHS_BufferInit(&packet.body, shard.size(), shard.size());
+    IHS_BufferAppendMem(&packet.body, shard.data(), shard.size());
+    IHS_SessionPacket message{};
+    *complete = IHS_SessionFECAdd(fec, &packet, &message);
+    IHS_BufferClear(&packet.body, true);
+    std::vector<uint8_t> out;
+    if (*complete) {
+        CHECK_EQ(message.header.type, IHS_SessionPacketTypeUnreliable);
+        CHECK_EQ(message.header.fragmentId, 0);
+        CHECK_EQ(message.header.packetId, id);
+        out.assign(IHS_BufferPointer(&message.body), IHS_BufferPointer(&message.body) + message.body.size);
+        IHS_BufferClear(&message.body, true);
+    }
+    return out;
+}
+
+// Sends every shard of a message except the dropped ones; returns how many completed it.
+int FecSend(IHS_SessionFEC *fec, uint16_t id, const std::vector<uint8_t> &message, uint16_t shardSize,
+            uint16_t m, const std::vector<int> &dropped) {
+    auto shards = FecShards(message, shardSize, m);
+    int completed = 0;
+    for (size_t i = 0; i < shards.size(); i++) {
+        if (std::find(dropped.begin(), dropped.end(), static_cast<int>(i)) != dropped.end()) continue;
+        bool complete = false;
+        auto out = FecAdd(fec, id, static_cast<int>(i), shards[i], &complete);
+        if (complete) {
+            completed++;
+            CHECK(out == message);
+        }
+    }
+    return completed;
+}
+
+void TestFec() {
+    std::vector<uint8_t> small(5000), large(36399);
+    for (size_t i = 0; i < small.size(); i++) small[i] = static_cast<uint8_t>(i * 7 + 3);
+    for (size_t i = 0; i < large.size(); i++) large[i] = static_cast<uint8_t>(i * 13 + i / 251);
+    IHS_SessionFEC *fec = IHS_SessionFECCreate();
+    CHECK_EQ(FecSend(fec, 1, small, 1440, 1, {}), 1);       // 4 data shards, nothing lost
+    CHECK_EQ(FecSend(fec, 2, small, 1440, 1, {2}), 1);      // one data shard rebuilt
+    CHECK_EQ(FecSend(fec, 3, small, 1440, 1, {3}), 1);      // the short last shard rebuilt
+    CHECK_EQ(FecSend(fec, 4, small, 1440, 1, {4}), 1);      // parity lost: data alone
+    CHECK_EQ(FecSend(fec, 5, small, 1440, 1, {0, 1}), 0);   // two lost, one parity: gone
+    CHECK_EQ(FecSend(fec, 6, large, 1440, 2, {3, 17}), 1);  // 26 data shards, two rebuilt
+    CHECK_EQ(FecSend(fec, 7, large, 1440, 2, {25, 26}), 1);  // last data and first parity lost
+    CHECK_EQ(FecSend(fec, 8, large, 1440, 2, {0, 9, 27}), 0);
+    CHECK_EQ(FecSend(fec, 9, std::vector<uint8_t>(53, 0x41), 64, 1, {0}), 1);  // the parity is a copy
+
+    // A message is out as soon as its data shards are in; later shards change nothing.
+    auto shards = FecShards(small, 1440, 1);
+    bool complete = false;
+    for (int i = 0; i < 4; i++) FecAdd(fec, 10, i, shards[i], &complete);
+    CHECK(complete);
+    FecAdd(fec, 10, 4, shards[4], &complete);
+    CHECK(!complete);
+    FecAdd(fec, 10, 1, shards[1], &complete);  // duplicate
+    CHECK(!complete);
+
+    // Messages 11..44 in order; a shard of message 11 after that is 33 behind and dropped.
+    for (uint16_t id = 11; id <= 44; id++) CHECK_EQ(FecSend(fec, id, small, 1440, 1, {}), 1);
+    FecAdd(fec, 11, 0, shards[0], &complete);
+    CHECK(!complete);
+
+    IHS_SessionFECStats stats;
+    IHS_SessionFECGetStats(fec, &stats);
+    CHECK_EQ(stats.recovered, 5u);  // 2, 3, 6, 7, 9
+    // Messages 1..12 left the window; 5 and 8 never completed.
+    CHECK_EQ(stats.unrecoverable, 2u);
+    // Lost shards of the retired messages 1..12: one each in 2, 3, 4 and 9, two in 5, two in 6,
+    // two in 7, three in 8.
+    CHECK_EQ(stats.shardsLost, 4u + 2u + 2u + 2u + 3u);
+    IHS_SessionFECDestroy(fec);
+}
+
 }  // namespace
 
 int main() {
@@ -565,6 +707,8 @@ int main() {
     TestPacketWindowContiguousId();
     TestPacketWindowFullIsNotEmpty();
     TestPacketWindowDiscardAndReset();
+    TestPacketWindowSkipLost();
+    TestFec();
     IHS_Quit();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

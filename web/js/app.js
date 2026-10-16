@@ -19,11 +19,21 @@
         {label: '4K', w: 3840, h: 2160},
     ];
 
+    var QUALITIES = {'-1': 'Automatic', 1: 'Fast', 2: 'Balanced', 3: 'Beautiful'};
+
+    function bandwidthText(kbps) {
+        return kbps < 0 ? 'Automatic' : kbps / 1000 + ' Mbit/s';
+    }
+
     var SETTINGS = [
         {key: 'resolution', label: 'Maximum resolution', values: [0, 1, 2, 3],
             text: function (v) { return RESOLUTIONS[v].label; }},
         {key: 'hevc', label: 'Video codec', values: [false, true],
             text: function (v) { return v ? 'HEVC' : 'H.264'; }},
+        {key: 'quality', label: 'Quality', values: [-1, 1, 2, 3],
+            text: function (v) { return QUALITIES[v]; }},
+        {key: 'bandwidth', label: 'Bandwidth limit', values: [-1, 5000, 10000, 15000, 20000, 30000, 50000, 75000, 100000],
+            text: bandwidthText},
         {key: 'audio', label: 'Audio', values: [true, false], kind: 'switch',
             text: function (v) { return v ? 'On' : 'Off'; }},
         {key: 'bigPicture', label: 'Start in', values: [false, true],
@@ -32,7 +42,8 @@
             text: function (v) { return v ? 'Shown' : 'Hidden'; }},
     ];
 
-    var DEFAULT_SETTINGS = {resolution: 1, hevc: false, audio: true, bigPicture: false, stats: false};
+    var DEFAULT_SETTINGS = {resolution: 1, hevc: false, quality: 2, bandwidth: 30000, audio: true, bigPicture: false,
+        stats: false};
     var ONLINE_MS = 9000;
     var PAIR_TIMEOUT_MS = 120000;
     var CONNECT_TIMEOUT_MS = 30000;
@@ -315,7 +326,8 @@
 
     function settingsSummary() {
         var res = RESOLUTIONS[state.settings.resolution] || RESOLUTIONS[1];
-        return 'Up to ' + res.label + '  ·  ' + (state.settings.hevc ? 'HEVC' : 'H.264') + '  ·  audio ' +
+        return 'Up to ' + res.label + '  ·  ' + (state.settings.hevc ? 'HEVC' : 'H.264') + '  ·  ' +
+            QUALITIES[state.settings.quality] + ', ' + bandwidthText(state.settings.bandwidth) + '  ·  audio ' +
             (state.settings.audio ? 'on' : 'off') + '  ·  opens ' +
             (state.settings.bigPicture ? 'Big Picture' : 'the desktop');
     }
@@ -653,7 +665,8 @@
         setFocus(null);
         showStreamStatus('Starting the stream…');
         var ok = mod.startStream(host.ip, String(host.steamId || ''), host.key, res.w, res.h,
-            !!state.settings.hevc, !!state.settings.audio, !!state.settings.bigPicture);
+            !!state.settings.hevc, !!state.settings.audio, !!state.settings.bigPicture,
+            Number(state.settings.quality), Number(state.settings.bandwidth));
         if (!ok) streamFailed('Could not contact ' + host.hostname + '.');
     }
 
@@ -692,6 +705,18 @@
         location.reload();
     }
 
+    // Packet loss over the last interval and in total, what FEC made up for, and the round trip.
+    function networkStats(st, last) {
+        var lost = (st.videoPacketsLost || 0) - last.videoPacketsLost;
+        var sent = (st.videoPackets || 0) - last.videoPackets + lost;
+        var total = (st.videoPackets || 0) + (st.videoPacketsLost || 0);
+        var pct = function (n, d) { return (d > 0 ? 100 * n / d : 0).toFixed(2) + '%'; };
+        return 'loss ' + pct(lost, sent) + ' now, ' + pct(st.videoPacketsLost || 0, total) + ' overall\n' +
+            (st.fec ? 'FEC: ' + st.fecRecovered + ' rebuilt, ' + st.fecUnrecoverable + ' lost' : 'FEC: off') +
+            '   keyframe requests ' + (st.lostReports || 0) + '\n' +
+            'round trip ' + (st.roundTripMs > 0 ? st.roundTripMs.toFixed(1) + ' ms' : 'not measured yet');
+    }
+
     function updateStats() {
         var s = state.stream;
         if (!s || !mod) return;
@@ -711,9 +736,11 @@
                 fps.toFixed(0) + ' fps   ' + mbps.toFixed(1) + ' Mbit/s\n' +
                 'target ' + (st.targetBitrate / 1e6).toFixed(1) + ' Mbit/s' +
                 (st.framerateDen ? ' @ ' + (st.framerateNum / st.framerateDen).toFixed(0) + ' fps' : '') + '\n' +
-                'keyframes ' + st.keyFrames + '   failed appends ' + (st.videoFailed + st.audioFailed);
+                'keyframes ' + st.keyFrames + '   failed appends ' + (st.videoFailed + st.audioFailed) + '\n' +
+                networkStats(st, s.last);
         }
-        s.last = {time: now, videoFrames: st.videoFrames, videoBytes: st.videoBytes};
+        s.last = {time: now, videoFrames: st.videoFrames, videoBytes: st.videoBytes,
+            videoPackets: st.videoPackets || 0, videoPacketsLost: st.videoPacketsLost || 0};
         $('#stream-stats').textContent = text;
     }
 

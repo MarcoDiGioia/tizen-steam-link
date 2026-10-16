@@ -1,0 +1,185 @@
+Count packet loss, keyframe requests and the round trip for the app.
+
+IHS_SessionGetStreamStats returns the video packets received and lost (expected minus
+received over the packet ids, as RTP counts it), the data lost notifications sent for video
+(Steam answers each with a keyframe), and a smoothed round trip. The round trip comes from
+ACKs of reliable packets that were sent once: ihslib resends after 10 ms, so for a resent
+packet the ACK could belong to either send. Steam's ACK body holds its own receive time, not
+an echo of ours, which can't be compared across machines. The counters live in the session,
+so they stay readable after the data channels are gone.
+
+diff --git a/include/ihslib/session.h b/include/ihslib/session.h
+index 2ffd244..1f32ea2 100644
+--- a/include/ihslib/session.h
++++ b/include/ihslib/session.h
+@@ -195,4 +195,21 @@ void IHS_SessionStatsSetFullReporting(IHS_Session *session, bool enabled);
+ 
+ void IHS_SessionSetLogFunction(IHS_Session *session, IHS_LogFunction *logFunction);
+ 
+-const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session);
+\ No newline at end of file
++const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session);
++
++/**
++ * Counters since the session started, for display. Safe to call from any thread while the session
++ * exists, also after it has disconnected.
++ */
++typedef struct IHS_SessionStreamStats {
++    /** Packets received on the video channel. */
++    uint32_t videoPackets;
++    /** Video packets that never arrived (from gaps in the packet ids). */
++    uint32_t videoPacketsLost;
++    /** Data lost notifications sent for video. Steam answers each with a keyframe. */
++    uint32_t lostReports;
++    /** Smoothed round trip of reliable packets in milliseconds; 0 until measured. */
++    float roundTripMs;
++} IHS_SessionStreamStats;
++
++void IHS_SessionGetStreamStats(const IHS_Session *session, IHS_SessionStreamStats *stats);
+diff --git a/src/session/channels/ch_data.c b/src/session/channels/ch_data.c
+index 8df18b2..9aefc20 100644
+--- a/src/session/channels/ch_data.c
++++ b/src/session/channels/ch_data.c
+@@ -35,6 +35,8 @@
+ 
+ static void DataThreadWorker(IHS_SessionChannelData *channel);
+ 
++static void CountVideoPacket(IHS_SessionChannelData *channel, uint16_t packetId);
++
+ static void DataThreadInterrupt(IHS_SessionChannelData *channel);
+ 
+ static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
+@@ -78,6 +80,9 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
+     assert(dataCh->window != NULL);
+     IHS_SessionPacketType type = packet->header.type;
+     assert(type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag);
++    if (channel->type == IHS_SessionChannelTypeDataVideo) {
++        CountVideoPacket(dataCh, packet->header.packetId);
++    }
+     IHS_MutexLock(dataCh->windowLock);
+     if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
+         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data", "%s channel items overflow! Available: %u",
+@@ -93,7 +98,29 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
+     dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
+ }
+ 
++static void CountVideoPacket(IHS_SessionChannelData *channel, uint16_t packetId) {
++    IHS_SessionCounters *counters = &channel->base.session->counters;
++    if (!channel->seqStarted) {
++        channel->seqStarted = true;
++        channel->seqFirst = channel->seqHighest = packetId;
++    } else {
++        int16_t ahead = (int16_t) (packetId - (uint16_t) channel->seqHighest);
++        if (ahead > 0) {
++            channel->seqHighest += (uint32_t) ahead;
++        }
++    }
++    channel->seqReceived++;
++    // Expected minus received, as RTP counts it: a late packet makes up for the gap it left.
++    uint32_t expected = channel->seqHighest - channel->seqFirst + 1;
++    IHS_SessionCounterSet(counters->videoPackets, channel->seqReceived);
++    IHS_SessionCounterSet(counters->videoPacketsLost,
++                          expected > channel->seqReceived ? expected - channel->seqReceived : 0);
++}
++
+ void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
++    if (channel->type == IHS_SessionChannelTypeDataVideo) {
++        IHS_SessionCounterAdd(channel->session->counters.lostReports, 1);
++    }
+     CStreamDataLostMsg message = CSTREAM_DATA_LOST_MSG__INIT;
+     IHS_SessionPacket packet;
+     IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeUnreliable, true, IHS_PACKET_ID_NEXT);
+diff --git a/src/session/channels/ch_data.h b/src/session/channels/ch_data.h
+index fdc154c..5e62a58 100644
+--- a/src/session/channels/ch_data.h
++++ b/src/session/channels/ch_data.h
+@@ -49,6 +49,12 @@ typedef struct IHS_SessionChannelData {
+     IHS_Mutex *lock;
+ 
+     uint32_t lastPacketTimestamp;
++
++    /* Loss accounting for IHS_SessionStreamStats: packet ids extended to 32 bits. */
++    bool seqStarted;
++    uint32_t seqFirst;
++    uint32_t seqHighest;
++    uint32_t seqReceived;
+ } IHS_SessionChannelData;
+ 
+ typedef struct IHS_SessionChannelDataClass {
+diff --git a/src/session/retransmission.c b/src/session/retransmission.c
+index 95006e4..5a55d7c 100644
+--- a/src/session/retransmission.c
++++ b/src/session/retransmission.c
+@@ -99,7 +99,20 @@ bool IHS_RetransmissionCancel(IHS_SessionRetransmission *retransmission, IHS_Ses
+     IHS_MutexUnlock(retransmission->lock);
+     if (match == NULL) {
+         return false;
+-    } else if (match->task != NULL) {
++    }
++    if (match->packet.header.retransmitCount == 1) {
++        // Sent once (the queued copy counts 1), so the ACK can only be for that send. Smoothed
++        // like TCP's SRTT, by 1/8 per sample.
++        IHS_Session *session = retransmission->session;
++        uint32_t sample = IHS_SessionPacketTimestamp() - match->packet.header.sendTimestamp;
++        if (sample == 0) {
++            sample = 1;  // 0 means not measured
++        }
++        uint32_t rtt = IHS_SessionCounterGet(session->counters.roundTrip);
++        IHS_SessionCounterSet(session->counters.roundTrip,
++                              rtt == 0 ? sample : (uint32_t) ((int64_t) rtt + ((int64_t) sample - rtt) / 8));
++    }
++    if (match->task != NULL) {
+         IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
+                        "Cancelling Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
+                        channelId, packetId, fragmentId, match->packet.header.retransmitCount);
+diff --git a/src/session/session.c b/src/session/session.c
+index 2cd889e..089213e 100644
+--- a/src/session/session.c
++++ b/src/session/session.c
+@@ -195,6 +195,14 @@ const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session) {
+     return &session->info;
+ }
+ 
++void IHS_SessionGetStreamStats(const IHS_Session *session, IHS_SessionStreamStats *stats) {
++    memset(stats, 0, sizeof(*stats));
++    stats->videoPackets = IHS_SessionCounterGet(session->counters.videoPackets);
++    stats->videoPacketsLost = IHS_SessionCounterGet(session->counters.videoPacketsLost);
++    stats->lostReports = IHS_SessionCounterGet(session->counters.lostReports);
++    stats->roundTripMs = (float) IHS_SessionCounterGet(session->counters.roundTrip) * 1000.0f / 65536.0f;
++}
++
+ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
+     (void) address;
+     IHS_Session *session = (IHS_Session *) base;
+diff --git a/src/session/session_pri.h b/src/session/session_pri.h
+index b96f171..aaf2e46 100644
+--- a/src/session/session_pri.h
++++ b/src/session/session_pri.h
+@@ -76,6 +76,19 @@ typedef struct IHS_SessionState {
+ 
+ struct IHS_FrameStatsAggregator;
+ 
++/* Written by session threads, read by the app through IHS_SessionGetStreamStats. */
++typedef struct IHS_SessionCounters {
++    uint32_t videoPackets;
++    uint32_t videoPacketsLost;
++    uint32_t lostReports;
++    /* Smoothed round trip, in packet timestamp units (1/65536 s); 0 until measured. */
++    uint32_t roundTrip;
++} IHS_SessionCounters;
++
++#define IHS_SessionCounterAdd(field, n) __atomic_fetch_add(&(field), (n), __ATOMIC_RELAXED)
++#define IHS_SessionCounterSet(field, v) __atomic_store_n(&(field), (v), __ATOMIC_RELAXED)
++#define IHS_SessionCounterGet(field) __atomic_load_n(&(field), __ATOMIC_RELAXED)
++
+ struct IHS_Session {
+     IHS_Base base;
+     IHS_SessionInfo info;
+@@ -90,6 +103,7 @@ struct IHS_Session {
+     IHS_SessionRetransmission retransmission;
+     IHS_HIDManager *hidManager;
+     struct IHS_FrameStatsAggregator *frameStats;
++    IHS_SessionCounters counters;
+     struct {
+         const IHS_StreamSessionCallbacks *session;
+         const IHS_StreamAudioCallbacks *audio;

@@ -13,8 +13,9 @@ endif ()
 # k_ERemoteDeviceAuthorizationFailed once the PIN is typed. GitHub serves PR commits from
 # the upstream repository.
 # patches/ihslib: two threading fixes, logging for the authorization request, a callback
-# signature fix that only matters on Emscripten (the timer thread), and two fixes for packet
-# loss (cumulative ACKs on the control channel, data channels getting past a lost packet);
+# signature fix that only matters on Emscripten (the timer thread), fixes for packet loss
+# (cumulative ACKs on the control channel, data channels getting past a lost packet, skipping
+# a lost frame at once), stream statistics, video FEC, and the quality and bitrate settings;
 # each patch starts with a description.
 set(TSL_IHSLIB_PATCHES ${CMAKE_CURRENT_LIST_DIR}/../patches/ihslib)
 FetchContent_Declare(ihslib
@@ -26,6 +27,10 @@ FetchContent_Declare(ihslib
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0004-timer-thread-worker-signature.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0005-control-cumulative-ack.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0006-data-channel-loss-recovery.patch
+              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0007-data-channel-skip-lost-frames.patch
+              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0008-session-stream-stats.patch
+              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0009-unreliable-fec.patch
+              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0010-quality-and-bitrate.patch
         SOURCE_SUBDIR no-cmake)
 
 # protobuf-c runtime only; the generated .pb-c.c files ship with ihslib.

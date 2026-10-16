@@ -87,6 +87,15 @@ SessionStats Session::Stats() const {
     s.videoCodec = static_cast<IHS_StreamVideoCodec>(videoCodec_.load());
     s.audioCodec = static_cast<IHS_StreamAudioCodec>(audioCodec_.load());
     s.targetBitrate = bitrate_.load();
+    IHS_SessionStreamStats net;
+    IHS_SessionGetStreamStats(session_, &net);
+    s.videoPackets = net.videoPackets;
+    s.videoPacketsLost = net.videoPacketsLost;
+    s.lostReports = net.lostReports;
+    s.roundTripMs = net.roundTripMs;
+    s.fec = net.fec;
+    s.fecRecovered = net.fecRecovered;
+    s.fecUnrecoverable = net.fecUnrecoverable;
     s.framerateNum = fpsNum_.load();
     s.framerateDen = fpsDen_.load();
     return s;
@@ -150,7 +159,11 @@ void Session::CbConfiguring(IHS_Session *, IHS_SessionConfig *config, void *cont
     auto *self = static_cast<Session *>(context);
     config->enableAudio = self->options_.audio;
     config->enableHevc = self->options_.hevc && self->media_->SupportsHevc();
-    Log(IHS_LogLevelInfo, "Session", "Negotiating: audio=%d hevc=%d", config->enableAudio, config->enableHevc);
+    config->enableFec = self->options_.fec;
+    config->quality = self->options_.quality;
+    config->bitrateKbps = self->options_.bitrateKbps;
+    Log(IHS_LogLevelInfo, "Session", "Negotiating: audio=%d hevc=%d fec=%d quality=%d bitrate=%d",
+        config->enableAudio, config->enableHevc, config->enableFec, config->quality, config->bitrateKbps);
 }
 
 void Session::CbConnected(IHS_Session *session, void *context) {

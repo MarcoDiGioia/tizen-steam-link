@@ -34,11 +34,17 @@ Dependencies (ihslib, mbedTLS 3.6, protobuf-c, Opus) are downloaded by CMake at 
 versions and checked by hash. Nothing is installed system-wide. ihslib is pinned to the head
 of its pull request #4, which adds the key exchange current Steam requires for pairing (an
 X25519 key masked with the PIN). The key Steam and the device agree on is per host, so the
-app stores one for each paired computer. `patches/ihslib` holds six patches applied to
+app stores one for each paired computer. `patches/ihslib` holds ten patches applied to
 ihslib at download time: two threading fixes, logging for the pairing request, a thread
-function signature fix the TV build needs, and two fixes that let a stream get past lost
-packets (on Wi-Fi a single one used to end the session or freeze the video for good). Each
-patch starts with a description of what it fixes.
+function signature fix the TV build needs, three fixes that let a stream get past lost
+packets (on Wi-Fi a single one used to end the session or freeze the video for good),
+stream statistics, forward error correction for video, and the quality and bitrate
+settings. Each patch starts with a description of what it does.
+
+Video uses Steam's forward error correction: every video message comes with one or two
+parity packets, and the app rebuilds a message that lost up to that many packets instead of
+waiting for a keyframe. The format isn't documented; `session/fec.h` in the FEC patch
+describes it as worked out from captured traffic.
 
 ## Building
 
@@ -115,14 +121,18 @@ back to H.264 otherwise, even with HEVC selected in the settings.
 - Selecting a paired computer starts the stream.
 - During a stream, holding Back leaves it, and so does pressing LB + RB + View + Menu on a
   controller. A short press of Back sends Escape to the computer. The red (A) key shows or
-  hides the stream statistics.
+  hides the stream statistics: resolution, frame rate and bitrate, packet loss (over the last
+  second and overall), messages rebuilt by error correction and lost anyway, keyframe
+  requests, and the round trip to the computer.
 - On the computer list, the red (A) key forgets the selected computer.
 - Keyboards and mice plugged into the TV are passed through. Click the picture to capture
   the mouse.
 - The app reloads its page after each stream, which resets the video player.
 
-Settings cover the maximum resolution (720p to 4K), H.264 or HEVC, audio, and whether the
-stream opens on the desktop or in Big Picture.
+Settings cover the maximum resolution (720p to 4K), H.264 or HEVC, Steam's quality
+preference (Automatic, Fast, Balanced, Beautiful), a bandwidth limit (Automatic, or 5 to
+100 Mbit/s; 30 by default), audio, and whether the stream opens on the desktop or in Big
+Picture. On a busy Wi-Fi network a lower bandwidth limit means fewer packets to lose.
 
 ## tsl-cli
 
@@ -135,8 +145,11 @@ tsl-cli stream <ip> --seconds 20 --out /tmp/stream
 ```
 
 `pair` also takes `--pin NNNN` and `--wait SECONDS` (120 by default). `stream` also takes
-`--hevc`, `--no-audio`, `--max 1920x1080`, and `--input-test`, which plugs in a virtual
-gamepad, presses A and D-pad down, and sends Escape, so the effect shows in the recording.
+`--hevc`, `--no-audio`, `--max 1920x1080`, `--quality auto|fast|balanced|beautiful`,
+`--bitrate KBPS` (-1 lets Steam decide), `--no-fec`, and `--input-test`, which plugs in a
+virtual gamepad, presses A and D-pad down, and sends Escape, so the effect shows in the
+recording. At the end it prints the frame count and a network summary: packets lost,
+messages rebuilt, keyframe requests and the round trip.
 The device identity and the paired computers, with their keys, are kept in
 `~/.config/tizen-steam-link`. The CLI has its own identity, so it is paired separately
 from the TV.
@@ -144,7 +157,8 @@ from the TV.
 To see how a stream copes with Wi-Fi-like packet loss on a wired network, set
 `TSL_TEST_RECV_LOSS` to a percentage, for example `TSL_TEST_RECV_LOSS=0.5 tsl-cli stream ...`.
 The desktop build then drops that share of incoming datagrams of 1000 bytes or more and logs
-each drop and each retransmission it sees. The TV build doesn't have this.
+each drop, each retransmission, and each dropped packet that arrives again. The TV build
+doesn't have this.
 
 ## Trying the interface in a browser
 

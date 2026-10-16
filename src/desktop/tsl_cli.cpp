@@ -354,6 +354,7 @@ void Usage() {
                  "  probe <ip> [--seconds N]         ask one host directly (no broadcast)\n"
                  "  pair <ip> [--pin NNNN] [--wait S] pair this device; type the PIN into Steam on the host\n"
                  "  stream <ip> [--seconds N] [--out DIR] [--hevc] [--no-audio] [--max WxH] [--input-test]\n"
+                 "              [--quality auto|fast|balanced|beautiful] [--bitrate KBPS] [--no-fec]\n"
                  "                                   stream and write video.h264/.hevc and audio.wav;\n"
                  "                                   --input-test plugs in a virtual pad and presses buttons\n"
                  "\n"
@@ -372,7 +373,7 @@ struct Args {
 };
 
 Args ParseArgs(int argc, char **argv) {
-    static const char *flags[] = {"--hevc", "--no-audio", "--input-test", "-v"};
+    static const char *flags[] = {"--hevc", "--no-audio", "--input-test", "--no-fec", "-v"};
     Args args;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -523,6 +524,16 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
     tsl::SessionOptions options;
     options.audio = !args.Has("--no-audio");
     options.hevc = args.Has("--hevc");
+    options.fec = !args.Has("--no-fec");
+    static const std::map<std::string, int> qualities = {
+            {"auto", -1}, {"fast", 1}, {"balanced", 2}, {"beautiful", 3}};
+    std::string quality = args.Get("--quality", "balanced");
+    if (!qualities.count(quality)) {
+        std::fprintf(stderr, "Bad --quality %s\n", quality.c_str());
+        return 2;
+    }
+    options.quality = qualities.at(quality);
+    options.bitrateKbps = std::atoi(args.Get("--bitrate", "0").c_str());
     FileSink sink(out, options.hevc);
     tsl::Session session(identity, pairing.key, info, options, &sink, &sink);
     if (!session.Connect()) {
@@ -576,6 +587,11 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
     std::printf("Audio: %llu packets, %llu bytes, %llu decode errors\n",
                 static_cast<unsigned long long>(s.audioPackets), static_cast<unsigned long long>(s.audioBytes),
                 static_cast<unsigned long long>(sink.decode_errors()));
+    uint32_t sent = s.videoPackets + s.videoPacketsLost;
+    std::printf("Network: %u video packets, %u lost (%.2f%%), FEC %s (%u rebuilt, %u lost), "
+                "%u keyframe requests, round trip %.1f ms\n",
+                s.videoPackets, s.videoPacketsLost, sent > 0 ? 100.0 * s.videoPacketsLost / sent : 0.0,
+                s.fec ? "on" : "off", s.fecRecovered, s.fecUnrecoverable, s.lostReports, s.roundTripMs);
     if (!sink.video_path().empty()) std::printf("Wrote %s\n", sink.video_path().c_str());
     if (!sink.audio_path().empty()) std::printf("Wrote %s\n", sink.audio_path().c_str());
     return s.videoFrames > 0 ? 0 : 1;

@@ -1,0 +1,593 @@
+Ask for forward error correction on video and rebuild lost packets.
+
+Current Steam sends video with FEC when the client sets enable_unreliable_fec (field 25 of
+CStreamingClientConfig). The format, worked out from captured traffic and described in
+session/fec.h: each message goes out under one packet id as UnreliableFEC packets (type 11),
+k data shards and m parity shards, the fragment id being the shard index. Parity shard r is
+the sum of d_i / (r + m + i) over GF(2^8), polynomial 0x11d, + being XOR: a Cauchy matrix.
+Steam used m = 1, and m = 2 for messages above about 30 KB. All 6074 parity rows in two
+captures matched, and replaying the captures with drops (up to every third large shard)
+rebuilt every message that had at most m shards missing, byte for byte.
+
+IHS_SessionFECAdd reassembles the shards of up to 32 messages in flight and hands each
+complete or rebuilt message to the window as a plain Unreliable packet, so the rest of the
+data path is unchanged. A message that loses more than m shards is lost as before (skipped,
+keyframe request). IHS_SessionConfig.enableFec turns it on. A host that doesn't know the
+field ignores it, as protobuf does, and plain packets are still handled. Without this patch
+the header parser rejected type 11, so turning FEC on meant no video at all. The stream stats
+gain fec, fecRecovered and fecUnrecoverable.
+
+diff --git a/include/ihslib/session.h b/include/ihslib/session.h
+index 1f32ea2..4b53e3f 100644
+--- a/include/ihslib/session.h
++++ b/include/ihslib/session.h
+@@ -43,6 +43,8 @@ typedef struct IHS_SessionInfo {
+ typedef struct IHS_SessionConfig {
+     bool enableAudio;
+     bool enableHevc;
++    /** Ask the host for forward error correction on video, so a lost packet can be rebuilt. */
++    bool enableFec;
+ } IHS_SessionConfig;
+ 
+ typedef struct IHS_StreamSessionCallbacks {
+@@ -210,6 +212,12 @@ typedef struct IHS_SessionStreamStats {
+     uint32_t lostReports;
+     /** Smoothed round trip of reliable packets in milliseconds; 0 until measured. */
+     float roundTripMs;
++    /** The host sends video with forward error correction. Packets above count its shards. */
++    bool fec;
++    /** Video messages rebuilt from FEC parity. */
++    uint32_t fecRecovered;
++    /** Video messages lost despite FEC (more shards missing than the parity covers). */
++    uint32_t fecUnrecoverable;
+ } IHS_SessionStreamStats;
+ 
+ void IHS_SessionGetStreamStats(const IHS_Session *session, IHS_SessionStreamStats *stats);
+diff --git a/src/session/channels/ch_control_negotiation.c b/src/session/channels/ch_control_negotiation.c
+index a943e46..e667b91 100644
+--- a/src/session/channels/ch_control_negotiation.c
++++ b/src/session/channels/ch_control_negotiation.c
+@@ -164,6 +164,15 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
+ 
+     clientConfig.controller_overlay_hotkey = "auto";
+ 
++    // enable_unreliable_fec (25) is newer than ihslib's copy of the protocol. protobuf-c packs
++    // unknown fields as they are, so it goes out that way.
++    uint8_t fecOn = 1;
++    ProtobufCMessageUnknownField fecField = {25, PROTOBUF_C_WIRE_TYPE_VARINT, 1, &fecOn};
++    if (ihsConf.enableFec) {
++        clientConfig.base.n_unknown_fields = 1;
++        clientConfig.base.unknown_fields = &fecField;
++    }
++
+     CStreamingClientCaps clientCaps = CSTREAMING_CLIENT_CAPS__INIT;
+ 
+     clientCaps.system_info = "\"SystemInfo\"\n{\n\t\"OSType\"\t\t\"-197\"\n\t\"CPUID\"\t\t\"ARM\"\n"
+diff --git a/src/session/channels/ch_data.c b/src/session/channels/ch_data.c
+index 9aefc20..d9a54ff 100644
+--- a/src/session/channels/ch_data.c
++++ b/src/session/channels/ch_data.c
+@@ -37,6 +37,8 @@ static void DataThreadWorker(IHS_SessionChannelData *channel);
+ 
+ static void CountVideoPacket(IHS_SessionChannelData *channel, uint16_t packetId);
+ 
++static void CountFEC(IHS_SessionChannelData *channel);
++
+ static void DataThreadInterrupt(IHS_SessionChannelData *channel);
+ 
+ static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
+@@ -56,6 +58,7 @@ void IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
+     dataCh->windowLock = IHS_MutexCreate();
+     dataCh->windowCond = IHS_CondCreate();
+     dataCh->window = IHS_SessionPacketsWindowCreate(windowCapacity);
++    dataCh->fec = IHS_SessionFECCreate();
+     dataCh->interrupted = false;
+     char threadName[16];
+     snprintf(threadName, 16, "IHS%s", DataChannelName(channel->type));
+@@ -69,6 +72,8 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
+ 
+     IHS_ThreadJoin(dataCh->worker);
+     IHS_SessionPacketsWindowDestroy(dataCh->window);
++    IHS_SessionFECDestroy(dataCh->fec);
++    dataCh->fec = NULL;
+     IHS_MutexDestroy(dataCh->windowLock);
+     IHS_CondDestroy(dataCh->windowCond);
+     dataCh->window = NULL;
+@@ -78,11 +83,24 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
+ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
+     IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *) channel;
+     assert(dataCh->window != NULL);
+-    IHS_SessionPacketType type = packet->header.type;
+-    assert(type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag);
+-    if (channel->type == IHS_SessionChannelTypeDataVideo) {
++    IHS_SessionPacket assembled;
++    bool fromFec = packet->header.type == IHS_SessionPacketTypeUnreliableFEC;
++    if (fromFec) {
++        // Shards go to the FEC assembler; a complete (or rebuilt) message continues as one plain
++        // Unreliable packet, so the window and the frame handling stay as they are.
++        bool complete = IHS_SessionFECAdd(dataCh->fec, packet, &assembled);
++        if (channel->type == IHS_SessionChannelTypeDataVideo) {
++            CountFEC(dataCh);
++        }
++        if (!complete) {
++            return;
++        }
++        packet = &assembled;
++    } else if (channel->type == IHS_SessionChannelTypeDataVideo) {
+         CountVideoPacket(dataCh, packet->header.packetId);
+     }
++    IHS_SessionPacketType type = packet->header.type;
++    assert(type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag);
+     IHS_MutexLock(dataCh->windowLock);
+     if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
+         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data", "%s channel items overflow! Available: %u",
+@@ -96,6 +114,10 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
+     IHS_CondSignal(dataCh->windowCond);
+     IHS_MutexUnlock(dataCh->windowLock);
+     dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
++    if (fromFec) {
++        // The window took the body unless it ignored the message.
++        IHS_SessionPacketClear(&assembled, true);
++    }
+ }
+ 
+ static void CountVideoPacket(IHS_SessionChannelData *channel, uint16_t packetId) {
+@@ -117,6 +139,16 @@ static void CountVideoPacket(IHS_SessionChannelData *channel, uint16_t packetId)
+                           expected > channel->seqReceived ? expected - channel->seqReceived : 0);
+ }
+ 
++static void CountFEC(IHS_SessionChannelData *channel) {
++    IHS_SessionCounters *counters = &channel->base.session->counters;
++    IHS_SessionFECStats stats;
++    IHS_SessionFECGetStats(channel->fec, &stats);
++    IHS_SessionCounterSet(counters->fecShards, stats.shards);
++    IHS_SessionCounterSet(counters->fecShardsLost, stats.shardsLost);
++    IHS_SessionCounterSet(counters->fecRecovered, stats.recovered);
++    IHS_SessionCounterSet(counters->fecUnrecoverable, stats.unrecoverable);
++}
++
+ void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
+     if (channel->type == IHS_SessionChannelTypeDataVideo) {
+         IHS_SessionCounterAdd(channel->session->counters.lostReports, 1);
+diff --git a/src/session/channels/ch_data.h b/src/session/channels/ch_data.h
+index 5e62a58..07819df 100644
+--- a/src/session/channels/ch_data.h
++++ b/src/session/channels/ch_data.h
+@@ -29,6 +29,7 @@
+ #include "protobuf/remoteplay.pb-c.h"
+ #include "session/frame.h"
+ #include "session/window.h"
++#include "session/fec.h"
+ #include "ihs_thread.h"
+ 
+ typedef struct IHS_SessionDataFrameHeader {
+@@ -41,6 +42,8 @@ typedef struct IHS_SessionDataFrameHeader {
+ typedef struct IHS_SessionChannelData {
+     IHS_SessionChannel base;
+     IHS_SessionPacketsWindow *window;
++    /* Reassembles UnreliableFEC shards; used on the receive thread only. */
++    IHS_SessionFEC *fec;
+     IHS_Mutex *windowLock;
+     IHS_Cond *windowCond;
+ 
+diff --git a/src/session/fec.c b/src/session/fec.c
+new file mode 100644
+index 0000000..bc831c8
+--- /dev/null
++++ b/src/session/fec.c
+@@ -0,0 +1,314 @@
++/* SPDX-License-Identifier: LGPL-3.0-or-later */
++#include "fec.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++#include "endianness.h"
++#include "ihs_buffer.h"
++
++#define FEC_HEADER_SIZE 8
++/* Messages in flight. A shard more than this many messages late is dropped. */
++#define FEC_GROUPS 32
++/* Shard index is an int16 fragment id, and c_i = 1 / (i + 1) needs i + 1 <= 255. */
++#define FEC_MAX_SHARDS 255
++/* Datagrams are at most about 1500 bytes. */
++#define FEC_MAX_SHARD_SIZE 2048
++/* Size of the matrix to invert when rebuilding. Steam used 1 or 2. */
++#define FEC_MAX_PARITY 16
++
++typedef struct FECGroup {
++    bool active;
++    bool done;
++    uint16_t packetId;
++    IHS_SessionPacketHeader header;
++    uint32_t length;
++    uint16_t shardSize;
++    uint16_t dataShards;
++    uint16_t parityShards;
++    uint16_t received;
++    uint16_t dataReceived;
++    uint16_t parityReceived;
++    uint8_t present[(FEC_MAX_SHARDS + 7) / 8];
++    /* All shards in index order, data then parity; freed once the message is out. */
++    uint8_t *shards;
++} FECGroup;
++
++struct IHS_SessionFEC {
++    FECGroup groups[FEC_GROUPS];
++    bool started;
++    uint16_t newest;
++    uint32_t advanced;
++    uint8_t exp[512];
++    uint8_t log[256];
++    IHS_SessionFECStats stats;
++};
++
++static void GroupRetire(IHS_SessionFEC *fec, FECGroup *group);
++
++static bool GroupRebuild(const IHS_SessionFEC *fec, FECGroup *group);
++
++static inline bool GroupHas(const FECGroup *group, int index) {
++    return group->present[index / 8] & (1u << (index % 8));
++}
++
++IHS_SessionFEC *IHS_SessionFECCreate(void) {
++    IHS_SessionFEC *fec = calloc(1, sizeof(IHS_SessionFEC));
++    unsigned x = 1;
++    for (int i = 0; i < 255; i++) {
++        fec->exp[i] = (uint8_t) x;
++        fec->log[x] = (uint8_t) i;
++        x <<= 1;
++        if (x & 0x100) {
++            x ^= 0x11d;
++        }
++    }
++    for (int i = 255; i < 512; i++) {
++        fec->exp[i] = fec->exp[i - 255];
++    }
++    return fec;
++}
++
++void IHS_SessionFECDestroy(IHS_SessionFEC *fec) {
++    for (int i = 0; i < FEC_GROUPS; i++) {
++        free(fec->groups[i].shards);
++    }
++    free(fec);
++}
++
++bool IHS_SessionFECAdd(IHS_SessionFEC *fec, const IHS_SessionPacket *shard, IHS_SessionPacket *message) {
++    const uint8_t *body = IHS_BufferPointer(&shard->body);
++    size_t bodySize = shard->body.size;
++    if (bodySize <= FEC_HEADER_SIZE) {
++        return false;
++    }
++    uint32_t length;
++    uint16_t shardSize, parityShards;
++    IHS_ReadUInt32LE(body, &length);
++    IHS_ReadUInt16LE(body + 4, &shardSize);
++    IHS_ReadUInt16LE(body + 6, &parityShards);
++    if (length == 0 || shardSize == 0 || shardSize > FEC_MAX_SHARD_SIZE || parityShards == 0 ||
++        parityShards > FEC_MAX_PARITY) {
++        return false;
++    }
++    uint32_t dataShards = (length + shardSize - 1) / shardSize;
++    int index = shard->header.fragmentId;
++    if (dataShards + parityShards > FEC_MAX_SHARDS || index < 0 || (uint32_t) index >= dataShards + parityShards) {
++        return false;
++    }
++    fec->stats.shards++;
++
++    uint16_t id = shard->header.packetId;
++    if (!fec->started) {
++        fec->started = true;
++        fec->newest = (uint16_t) (id - 1);
++    }
++    int16_t ahead = (int16_t) (id - fec->newest);
++    if (ahead > FEC_GROUPS) {
++        // A jump past the whole window: the messages skipped over it are gone without a trace.
++        if (fec->advanced >= FEC_GROUPS) {
++            fec->stats.shardsLost += (uint32_t) (ahead - FEC_GROUPS);
++            fec->stats.unrecoverable += (uint32_t) (ahead - FEC_GROUPS);
++        }
++        fec->advanced += (uint32_t) (ahead - FEC_GROUPS);
++        fec->newest = (uint16_t) (id - FEC_GROUPS);
++        ahead = FEC_GROUPS;
++    }
++    if (ahead > 0) {
++        // Each id that becomes current takes the slot of the id FEC_GROUPS before it.
++        for (int16_t step = 0; step < ahead; step++) {
++            uint16_t current = (uint16_t) (fec->newest + 1 + step);
++            FECGroup *slot = &fec->groups[current % FEC_GROUPS];
++            if (slot->active) {
++                GroupRetire(fec, slot);
++            } else if (fec->advanced >= FEC_GROUPS) {
++                // Not a single shard of that message arrived.
++                fec->stats.shardsLost++;
++                fec->stats.unrecoverable++;
++            }
++            fec->advanced++;
++        }
++        fec->newest = id;
++    } else if (ahead <= -FEC_GROUPS) {
++        return false;
++    }
++
++    FECGroup *group = &fec->groups[id % FEC_GROUPS];
++    if (!group->active) {
++        memset(group, 0, sizeof(FECGroup));
++        group->active = true;
++        group->packetId = id;
++        group->header = shard->header;
++        group->length = length;
++        group->shardSize = shardSize;
++        group->dataShards = (uint16_t) dataShards;
++        group->parityShards = parityShards;
++        group->shards = calloc(dataShards + parityShards, shardSize);
++    } else if (group->packetId != id || group->length != length || group->shardSize != shardSize ||
++               group->parityShards != parityShards) {
++        return false;
++    }
++    if (GroupHas(group, index)) {
++        return false;
++    }
++    group->present[index / 8] |= (uint8_t) (1u << (index % 8));
++    group->received++;
++    if (group->done) {
++        return false;
++    }
++    size_t copy = bodySize - FEC_HEADER_SIZE < shardSize ? bodySize - FEC_HEADER_SIZE : shardSize;
++    memcpy(group->shards + (size_t) index * shardSize, body + FEC_HEADER_SIZE, copy);
++    if (index < group->dataShards) {
++        group->dataReceived++;
++    } else {
++        group->parityReceived++;
++    }
++
++    if (group->dataReceived < group->dataShards) {
++        if (group->dataReceived + group->parityReceived < group->dataShards || !GroupRebuild(fec, group)) {
++            return false;
++        }
++        fec->stats.recovered++;
++    }
++    group->done = true;
++    message->header = group->header;
++    message->header.type = IHS_SessionPacketTypeUnreliable;
++    message->header.fragmentId = 0;
++    message->crc = 0;
++    IHS_BufferInit(&message->body, group->length, group->length);
++    IHS_BufferAppendMem(&message->body, group->shards, group->length);
++    free(group->shards);
++    group->shards = NULL;
++    return true;
++}
++
++void IHS_SessionFECGetStats(const IHS_SessionFEC *fec, IHS_SessionFECStats *stats) {
++    *stats = fec->stats;
++}
++
++static void GroupRetire(IHS_SessionFEC *fec, FECGroup *group) {
++    fec->stats.shardsLost += (uint32_t) (group->dataShards + group->parityShards - group->received);
++    if (!group->done) {
++        fec->stats.unrecoverable++;
++    }
++    free(group->shards);
++    memset(group, 0, sizeof(FECGroup));
++}
++
++static inline uint8_t GfMul(const IHS_SessionFEC *fec, uint8_t a, uint8_t b) {
++    return a != 0 && b != 0 ? fec->exp[fec->log[a] + fec->log[b]] : 0;
++}
++
++static inline uint8_t GfInv(const IHS_SessionFEC *fec, uint8_t a) {
++    return fec->exp[255 - fec->log[a]];
++}
++
++/* Weight of data shard i in parity row r of m: 1 / (r + m + i), never 1 / 0 since r < m. */
++static inline uint8_t Coefficient(const IHS_SessionFEC *fec, int m, int r, int i) {
++    return GfInv(fec, (uint8_t) (r ^ (m + i)));
++}
++
++/* target += c * source */
++static void AddScaled(const IHS_SessionFEC *fec, uint8_t *target, const uint8_t *source, uint8_t c, size_t size) {
++    if (c == 0) {
++        return;
++    }
++    int logC = fec->log[c];
++    for (size_t j = 0; j < size; j++) {
++        if (source[j] != 0) {
++            target[j] ^= fec->exp[fec->log[source[j]] + logC];
++        }
++    }
++}
++
++/*
++ * Rebuilds the e missing data shards from e received parity rows. For each of those rows, the
++ * parity minus the known shards' part is what the missing shards add up to; inverting the e x e
++ * Cauchy submatrix (missing shards by rows) turns that into the shards.
++ */
++static bool GroupRebuild(const IHS_SessionFEC *fec, FECGroup *group) {
++    int k = group->dataShards, m = group->parityShards;
++    size_t size = group->shardSize;
++    int missing[FEC_MAX_PARITY], rows[FEC_MAX_PARITY];
++    int e = 0, p = 0;
++    for (int i = 0; i < k; i++) {
++        if (!GroupHas(group, i)) {
++            if (e == FEC_MAX_PARITY) {
++                return false;
++            }
++            missing[e++] = i;
++        }
++    }
++    for (int r = 0; r < m && p < e; r++) {
++        if (GroupHas(group, k + r)) {
++            rows[p++] = r;
++        }
++    }
++    if (e == 0 || p < e) {
++        return false;
++    }
++
++    // Gauss-Jordan on [M | I], M[a][b] = weight of missing shard b in row a.
++    uint8_t mat[FEC_MAX_PARITY][FEC_MAX_PARITY], inv[FEC_MAX_PARITY][FEC_MAX_PARITY];
++    for (int a = 0; a < e; a++) {
++        for (int b = 0; b < e; b++) {
++            mat[a][b] = Coefficient(fec, m, rows[a], missing[b]);
++            inv[a][b] = a == b;
++        }
++    }
++    for (int col = 0; col < e; col++) {
++        int pivot = col;
++        while (pivot < e && mat[pivot][col] == 0) {
++            pivot++;
++        }
++        if (pivot == e) {
++            return false;
++        }
++        for (int b = 0; b < e; b++) {
++            uint8_t t = mat[col][b];
++            mat[col][b] = mat[pivot][b];
++            mat[pivot][b] = t;
++            t = inv[col][b];
++            inv[col][b] = inv[pivot][b];
++            inv[pivot][b] = t;
++        }
++        uint8_t scale = GfInv(fec, mat[col][col]);
++        for (int b = 0; b < e; b++) {
++            mat[col][b] = GfMul(fec, mat[col][b], scale);
++            inv[col][b] = GfMul(fec, inv[col][b], scale);
++        }
++        for (int a = 0; a < e; a++) {
++            uint8_t factor = mat[a][col];
++            if (a == col || factor == 0) {
++                continue;
++            }
++            for (int b = 0; b < e; b++) {
++                mat[a][b] ^= GfMul(fec, factor, mat[col][b]);
++                inv[a][b] ^= GfMul(fec, factor, inv[col][b]);
++            }
++        }
++    }
++
++    uint8_t *rhs = malloc((size_t) e * size);
++    if (rhs == NULL) {
++        return false;
++    }
++    for (int a = 0; a < e; a++) {
++        uint8_t *row = rhs + (size_t) a * size;
++        memcpy(row, group->shards + (size_t) (k + rows[a]) * size, size);
++        for (int i = 0; i < k; i++) {
++            if (GroupHas(group, i)) {
++                AddScaled(fec, row, group->shards + (size_t) i * size, Coefficient(fec, m, rows[a], i), size);
++            }
++        }
++    }
++    for (int b = 0; b < e; b++) {
++        uint8_t *target = group->shards + (size_t) missing[b] * size;
++        memset(target, 0, size);
++        for (int a = 0; a < e; a++) {
++            AddScaled(fec, target, rhs + (size_t) a * size, inv[b][a], size);
++        }
++    }
++    free(rhs);
++    return true;
++}
+diff --git a/src/session/fec.h b/src/session/fec.h
+new file mode 100644
+index 0000000..8de4823
+--- /dev/null
++++ b/src/session/fec.h
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: LGPL-3.0-or-later */
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "packet.h"
++
++/*
++ * Forward error correction for unreliable data. Steam sends it when the client sets
++ * CStreamingClientConfig.enable_unreliable_fec (field 25).
++ *
++ * Each data message then goes out under one packet id, as packets of type UnreliableFEC: k data
++ * shards, then m parity shards, the fragment id being the shard index. Every shard body starts
++ * with an 8-byte header, little endian: u32 message length, u16 shard size, u16 m. The data
++ * shards hold the message cut into pieces of the shard size, the last one padded. Parity shard
++ * r is the sum over i of d_i / (r + m + i) in GF(2^8), polynomial 0x11d, where + is XOR: a
++ * Cauchy matrix with x_r = r and y_i = m + i. So a message can lose any m shards and still be
++ * rebuilt.
++ *
++ * Worked out from captured traffic: video only (audio stays plain), m = 1 for most messages
++ * and 2 for large ones (above about 30 KB). All 6074 parity rows in two captures matched.
++ */
++typedef struct IHS_SessionFEC IHS_SessionFEC;
++
++typedef struct IHS_SessionFECStats {
++    /** Shards received. */
++    uint32_t shards;
++    /** Shards that never arrived, counted when their message leaves the reorder window. */
++    uint32_t shardsLost;
++    /** Messages rebuilt from parity. */
++    uint32_t recovered;
++    /** Messages that lost more shards than the parity can make up for. */
++    uint32_t unrecoverable;
++} IHS_SessionFECStats;
++
++IHS_SessionFEC *IHS_SessionFECCreate(void);
++
++void IHS_SessionFECDestroy(IHS_SessionFEC *fec);
++
++/**
++ * Takes one UnreliableFEC packet. Returns true when it completes its message, or makes it
++ * rebuildable, and fills message with a plain Unreliable packet (fragment id 0, header of the
++ * message's first shard) holding the whole message. The caller owns message->body.
++ * Late, duplicate and malformed shards return false.
++ */
++bool IHS_SessionFECAdd(IHS_SessionFEC *fec, const IHS_SessionPacket *shard, IHS_SessionPacket *message);
++
++/** Not thread safe: call it from the thread that adds shards. */
++void IHS_SessionFECGetStats(const IHS_SessionFEC *fec, IHS_SessionFECStats *stats);
+diff --git a/src/session/packet.h b/src/session/packet.h
+index e55272b..646b4f2 100644
+--- a/src/session/packet.h
++++ b/src/session/packet.h
+@@ -49,6 +49,8 @@ typedef enum IHS_SessionPacketType {
+     IHS_SessionPacketTypeNACK = 8,
+     IHS_SessionPacketTypeDisconnect = 9,
+     IHS_SessionPacketTypeUnreliableNack = 10,
++    /** A shard of an unreliable message sent with forward error correction (session/fec.h). */
++    IHS_SessionPacketTypeUnreliableFEC = 11,
+     IHS_SessionPacketTypeMax,
+ } IHS_SessionPacketType;
+ 
+diff --git a/src/session/session.c b/src/session/session.c
+index 089213e..0230b7c 100644
+--- a/src/session/session.c
++++ b/src/session/session.c
+@@ -201,6 +201,12 @@ void IHS_SessionGetStreamStats(const IHS_Session *session, IHS_SessionStreamStat
+     stats->videoPacketsLost = IHS_SessionCounterGet(session->counters.videoPacketsLost);
+     stats->lostReports = IHS_SessionCounterGet(session->counters.lostReports);
+     stats->roundTripMs = (float) IHS_SessionCounterGet(session->counters.roundTrip) * 1000.0f / 65536.0f;
++    uint32_t fecShards = IHS_SessionCounterGet(session->counters.fecShards);
++    stats->fec = fecShards > 0;
++    stats->videoPackets += fecShards;
++    stats->videoPacketsLost += IHS_SessionCounterGet(session->counters.fecShardsLost);
++    stats->fecRecovered = IHS_SessionCounterGet(session->counters.fecRecovered);
++    stats->fecUnrecoverable = IHS_SessionCounterGet(session->counters.fecUnrecoverable);
+ }
+ 
+ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
+diff --git a/src/session/session_pri.h b/src/session/session_pri.h
+index aaf2e46..1802ab4 100644
+--- a/src/session/session_pri.h
++++ b/src/session/session_pri.h
+@@ -83,6 +83,10 @@ typedef struct IHS_SessionCounters {
+     uint32_t lostReports;
+     /* Smoothed round trip, in packet timestamp units (1/65536 s); 0 until measured. */
+     uint32_t roundTrip;
++    uint32_t fecShards;
++    uint32_t fecShardsLost;
++    uint32_t fecRecovered;
++    uint32_t fecUnrecoverable;
+ } IHS_SessionCounters;
+ 
+ #define IHS_SessionCounterAdd(field, n) __atomic_fetch_add(&(field), (n), __ATOMIC_RELAXED)

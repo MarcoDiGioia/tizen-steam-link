@@ -30,6 +30,13 @@ public:
 struct SessionOptions {
     bool audio = true;
     bool hevc = false;
+    // Forward error correction on video: the host adds a parity packet to every video message,
+    // so one lost packet per message is rebuilt instead of costing a keyframe.
+    bool fec = true;
+    // Steam's quality preference: -1 automatic, 1 fast, 2 balanced, 3 beautiful; 0 = balanced.
+    int quality = 0;
+    // Bitrate to ask for in kbit/s; 0 = 30000, -1 = let Steam decide.
+    int bitrateKbps = 0;
 };
 
 struct SessionStats {
@@ -45,6 +52,14 @@ struct SessionStats {
     int32_t targetBitrate = 0;
     uint32_t framerateNum = 0;
     uint32_t framerateDen = 0;
+    // Network, from ihslib (IHS_SessionStreamStats).
+    uint32_t videoPackets = 0;
+    uint32_t videoPacketsLost = 0;
+    uint32_t lostReports = 0;
+    float roundTripMs = 0;
+    bool fec = false;
+    uint32_t fecRecovered = 0;
+    uint32_t fecUnrecoverable = 0;
 };
 
 // One streaming session. Create it from Client::Listener::OnStreamReady, Connect(), and
