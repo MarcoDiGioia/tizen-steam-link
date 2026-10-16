@@ -24,9 +24,13 @@ const Player::Seconds kAudioMaxBehind(0.2);
 const Player::Seconds kAudioMaxAhead(0.15);
 constexpr auto kOpenTimeout = 5000ms;
 
-const char *VideoMime(IHS_StreamVideoCodec codec) {
-    switch (codec) {
+const char *VideoMime(const IHS_StreamVideoConfig &config) {
+    switch (config.codec) {
         case IHS_StreamVideoCodecH264:
+            // Level 4.2 tops out at 1080p60; Steam's 4K H.264 is level 5.1.
+            if (config.width * config.height > 1920 * 1088) {
+                return "video/mp4; codecs=\"avc1.640034\"";  // High, level 5.2 (4K60)
+            }
             return "video/mp4; codecs=\"avc1.64002A\"";  // High, level 4.2
         case IHS_StreamVideoCodecHEVC:
             return "video/mp4; codecs=\"hev1.1.6.L153.B0\"";  // Main, level 5.1 (4K60)
@@ -112,7 +116,7 @@ bool Player::WaitFor(std::chrono::milliseconds timeout, const std::function<bool
 Player::Seconds Player::Now() const { return std::chrono::steady_clock::now() - start_; }
 
 bool Player::OpenSource(const IHS_StreamVideoConfig &config) {
-    const char *mime = VideoMime(config.codec);
+    const char *mime = VideoMime(config);
     if (mime == nullptr) {
         Log(IHS_LogLevelError, "Player", "Unsupported video codec %d", config.codec);
         return false;

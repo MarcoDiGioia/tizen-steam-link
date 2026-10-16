@@ -35,11 +35,11 @@ versions and checked by hash. Nothing is installed system-wide. ihslib is pinned
 of its pull request #4, which adds the key exchange current Steam requires for pairing (an
 X25519 key masked with the PIN). The key Steam and the device agree on is per host, so the
 app stores one for each paired computer. `patches/ihslib` holds ten patches applied to
-ihslib at download time: two threading fixes, logging for the pairing request, a thread
-function signature fix the TV build needs, three fixes that let a stream get past lost
-packets (on Wi-Fi a single one used to end the session or freeze the video for good),
-stream statistics, forward error correction for video, and the quality and bitrate
-settings. Each patch starts with a description of what it does.
+ihslib at download time: two threading fixes, a thread function signature fix the TV build
+needs, three fixes that let a stream get past lost packets (on Wi-Fi a single one used to
+end the session or freeze the video for good), stream statistics, forward error correction
+for video, the quality and bitrate settings, and the codecs and picture size the client asks
+for. Each patch starts with a description of what it does.
 
 Video uses Steam's forward error correction: every video message comes with one or two
 parity packets, and the app rebuilds a message that lost up to that many packets instead of
@@ -133,6 +133,10 @@ Settings cover the maximum resolution (720p to 4K), H.264 or HEVC, Steam's quali
 preference (Automatic, Fast, Balanced, Beautiful), a bandwidth limit (Automatic, or 5 to
 100 Mbit/s; 30 by default), audio, and whether the stream opens on the desktop or in Big
 Picture. On a busy Wi-Fi network a lower bandwidth limit means fewer packets to lose.
+
+Steam sends HEVC only when the computer has a hardware encoder that can produce it; otherwise
+it falls back to H.264. For 4K, pick HEVC where the computer supports it, and a bandwidth
+limit of 50 Mbit/s or more.
 
 ## tsl-cli
 

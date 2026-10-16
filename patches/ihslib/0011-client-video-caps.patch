@@ -1,0 +1,71 @@
+Tell Steam which video codecs and how large a picture the client wants.
+
+Current Steam takes the decodable codecs from CStreamingClientCaps.supported_video_codecs
+(field 15) and marks the supports_video_hevc flag ihslib sets as obsolete. The caps now list
+HEVC then H.264 when HEVC is enabled, H.264 alone otherwise. The field is newer than ihslib's
+copy of the protocol, so it goes out as unknown fields, one per codec (repeated, unpacked).
+Decoded with the descriptor from Steam's own client, the message reads
+supported_video_codecs: [5, 4].
+
+The maximum resolution in the streaming request didn't lift the stream above 1080p: Steam
+logged "Maximum capture: 1920x1080" for a 3840x2160 request, from the display ihslib
+describes. CStreamingClientConfig fields 2 and 3 (desired_resolution_x/y in current Steam)
+were 0. IHS_SessionConfig gains maxWidth and maxHeight for them; with 3840x2160 Steam
+captures and encodes at 3840x2160.
+
+diff --git a/include/ihslib/session.h b/include/ihslib/session.h
+index 298baeb..1909759 100644
+--- a/include/ihslib/session.h
++++ b/include/ihslib/session.h
+@@ -52,6 +52,12 @@ typedef struct IHS_SessionConfig {
+     int quality;
+     /** Bitrate to ask for in kbit/s. 0 keeps 30000; -1 lets Steam decide. */
+     int bitrateKbps;
++    /**
++     * Largest picture the client wants. 0 leaves it to Steam, which then stays at the 1920x1080
++     * display ihslib describes; the maximum resolution in the streaming request doesn't lift that.
++     */
++    int maxWidth;
++    int maxHeight;
+ } IHS_SessionConfig;
+ 
+ typedef struct IHS_StreamSessionCallbacks {
+diff --git a/src/session/channels/ch_control_negotiation.c b/src/session/channels/ch_control_negotiation.c
+index fef170c..b17d818 100644
+--- a/src/session/channels/ch_control_negotiation.c
++++ b/src/session/channels/ch_control_negotiation.c
+@@ -137,8 +137,9 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
+ 
+     CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
+ 
+-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_x, 0);
+-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_y, 0);
++    // Fields 2 and 3 are desired_resolution_x/y in current Steam.
++    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_x, ihsConf.maxWidth > 0 ? ihsConf.maxWidth : 0);
++    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_y, ihsConf.maxHeight > 0 ? ihsConf.maxHeight : 0);
+     PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
+     PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
+     if (ihsConf.enableAudio) {
+@@ -194,6 +195,22 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
+     }
+     PROTOBUF_C_SET_VALUE(clientCaps, form_factor, k_EStreamDeviceFormFactorTV);
+ 
++    // supported_video_codecs (15) is newer than ihslib's copy of the protocol, where the caps only
++    // have supports_video_hevc, which current Steam marks obsolete. Repeated, unpacked: one
++    // unknown field per codec, the preferred one first.
++    uint8_t h264 = k_EStreamVideoCodecH264, hevc = k_EStreamVideoCodecHEVC;
++    ProtobufCMessageUnknownField codecFields[2] = {
++            {15, PROTOBUF_C_WIRE_TYPE_VARINT, 1, &hevc},
++            {15, PROTOBUF_C_WIRE_TYPE_VARINT, 1, &h264},
++    };
++    if (ihsConf.enableHevc) {
++        clientCaps.base.n_unknown_fields = 2;
++        clientCaps.base.unknown_fields = codecFields;
++    } else {
++        clientCaps.base.n_unknown_fields = 1;
++        clientCaps.base.unknown_fields = &codecFields[1];
++    }
++
+     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
+     response.config = &config;
+     response.streaming_client_config = &clientConfig;

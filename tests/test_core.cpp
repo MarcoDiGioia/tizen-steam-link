@@ -28,6 +28,8 @@ extern "C" {
 #include "ihs_buffer.h"
 #include "ihs_enumeration.h"
 #include "protobuf/discovery.pb-c.h"
+#include "session/channels/ch_data.h"
+#include "session/channels/ch_data_audio.h"
 #include "session/fec.h"
 #include "session/window.h"
 }
@@ -690,6 +692,84 @@ void TestFec() {
     IHS_SessionFECDestroy(fec);
 }
 
+// What an audio data channel hands to the app: the first payload byte of each packet.
+struct AudioCapture {
+    std::mutex mutex;
+    std::condition_variable cond;
+    std::vector<int> payloads;
+};
+
+int CaptureAudioStart(IHS_Session *, const IHS_StreamAudioConfig *, void *) { return 0; }
+
+int CaptureAudioSubmit(IHS_Session *, IHS_Buffer *data, void *context) {
+    auto *capture = static_cast<AudioCapture *>(context);
+    std::lock_guard<std::mutex> lock(capture->mutex);
+    capture->payloads.push_back(data->size > 0 ? IHS_BufferPointer(data)[0] : -1);
+    capture->cond.notify_all();
+    return 0;
+}
+
+void CaptureAudioStop(IHS_Session *, void *) {}
+
+// The data channel's worker must get past a lost packet. It used to wait behind it until its
+// window (256 packets for audio) overflowed, so the packets after a loss came seconds late.
+void TestDataChannelGetsPastLostPacket() {
+    uint8_t random[tsl::Identity::kRandomBytes] = {2};
+    tsl::Identity id = tsl::Identity::FromRandom(random, "test");
+    IHS_ClientConfig config = id.ClientConfig();
+    tsl::HostKey key{};
+    config.secretKey = key.data();
+    IHS_SessionInfo info{};
+    IHS_IPAddressFromString(&info.address.ip, "127.0.0.1");
+    info.address.port = 27031;
+    info.sessionKeyLen = 32;
+    IHS_Session *session = IHS_SessionCreate(&config, &info);
+    AudioCapture capture;
+    static const IHS_StreamAudioCallbacks callbacks = {
+            .start = CaptureAudioStart,
+            .submit = CaptureAudioSubmit,
+            .stop = CaptureAudioStop,
+    };
+    IHS_SessionSetAudioCallbacks(session, &callbacks, &capture);
+    CStartAudioDataMsg start = CSTART_AUDIO_DATA_MSG__INIT;
+    start.channel = 3;
+    start.codec = k_EStreamAudioCodecOpus;
+    start.channels = 2;
+    start.frequency = 48000;
+    IHS_SessionChannel *channel = IHS_SessionChannelDataAudioCreate(session, &start);
+
+    // Packets 10 ms apart, well inside the 200 ms after which stale packets are discarded.
+    auto send = [&](uint16_t id, int16_t fragments, bool fragment) {
+        IHS_SessionPacket packet{};
+        packet.header.type = fragment ? IHS_SessionPacketTypeUnreliableFrag : IHS_SessionPacketTypeUnreliable;
+        packet.header.channelId = static_cast<IHS_SessionChannelId>(start.channel);
+        packet.header.fragmentId = fragments;
+        packet.header.packetId = id;
+        packet.header.sendTimestamp = IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(1000 + id * 10);
+        // k_EStreamDataPacket, the 12-byte data frame header, then the payload: the packet id.
+        uint8_t body[1 + 12 + 1] = {k_EStreamDataPacket};
+        body[13] = static_cast<uint8_t>(id);
+        IHS_BufferInit(&packet.body, sizeof(body), sizeof(body));
+        IHS_BufferAppendMem(&packet.body, body, sizeof(body));
+        IHS_SessionChannelDataReceived(channel, &packet);
+        IHS_BufferClear(&packet.body, true);
+    };
+    send(0, 0, false);
+    send(1, 2, false);  // a frame of packets 1, 2 and 3; 2 is lost
+    send(3, 0, true);
+    send(4, 0, false);
+    // 5 is lost: a one-packet frame
+    for (uint16_t id = 6; id < 10; id++) send(id, 0, false);
+    {
+        std::unique_lock<std::mutex> lock(capture.mutex);
+        capture.cond.wait_for(lock, std::chrono::seconds(1), [&] { return capture.payloads.size() >= 6; });
+        CHECK(capture.payloads == (std::vector<int>{0, 4, 6, 7, 8, 9}));
+    }
+    IHS_SessionChannelStop(channel);
+    IHS_SessionChannelDestroy(channel);
+    IHS_SessionDestroy(session);
+}
+
 }  // namespace
 
 int main() {
@@ -709,6 +789,7 @@ int main() {
     TestPacketWindowDiscardAndReset();
     TestPacketWindowSkipLost();
     TestFec();
+    TestDataChannelGetsPastLostPacket();
     IHS_Quit();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

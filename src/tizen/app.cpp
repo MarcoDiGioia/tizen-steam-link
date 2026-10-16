@@ -152,7 +152,6 @@ public:
         if (!identity) return false;
         identity_ = *identity;
         client_ = std::make_unique<Client>(identity_, this);
-        client_->CheckTimerThread();
         polling_ = true;
         gamepadThread_ = std::thread([this] { PollGamepads(); });
         return true;
@@ -557,6 +556,8 @@ bool StartStream(const std::string &ip, const std::string &steamId, const std::s
     params.options.audio = audio;
     params.options.quality = quality;
     params.options.bitrateKbps = bitrateKbps;
+    params.options.maxWidth = maxWidth;
+    params.options.maxHeight = maxHeight;
     return g_app->StartStream(params);
 }
 

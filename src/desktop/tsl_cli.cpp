@@ -534,6 +534,8 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
     }
     options.quality = qualities.at(quality);
     options.bitrateKbps = std::atoi(args.Get("--bitrate", "0").c_str());
+    options.maxWidth = request.maxWidth;
+    options.maxHeight = request.maxHeight;
     FileSink sink(out, options.hevc);
     tsl::Session session(identity, pairing.key, info, options, &sink, &sink);
     if (!session.Connect()) {

@@ -12,18 +12,18 @@ endif ()
 # X25519 key exchange that current Steam requires for pairing. Without it Steam answers
 # k_ERemoteDeviceAuthorizationFailed once the PIN is typed. GitHub serves PR commits from
 # the upstream repository.
-# patches/ihslib: two threading fixes, logging for the authorization request, a callback
-# signature fix that only matters on Emscripten (the timer thread), fixes for packet loss
-# (cumulative ACKs on the control channel, data channels getting past a lost packet, skipping
-# a lost frame at once), stream statistics, video FEC, and the quality and bitrate settings;
-# each patch starts with a description.
+# patches/ihslib: two threading fixes, a callback signature fix that only matters on
+# Emscripten (the timer thread), fixes for packet loss (cumulative ACKs on the control
+# channel, data channels getting past a lost packet, skipping a lost frame at once), stream
+# statistics, video FEC, the quality and bitrate settings, and the codecs and resolution the
+# client asks for; each patch starts with a description. (0003, logging for the pairing
+# request, was dropped once pairing worked on the TV.)
 set(TSL_IHSLIB_PATCHES ${CMAKE_CURRENT_LIST_DIR}/../patches/ihslib)
 FetchContent_Declare(ihslib
         URL https://github.com/mariotaku/ihslib/archive/f68de5f07e0c27ccea9f47f9f5e38fd92c99919e.tar.gz
         URL_HASH SHA256=a4bd258835a9689929fc08aa68146f2a13f079cb50e0d59cf91c73e2690ea767
         PATCH_COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0001-control-send-lock.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0002-client-task-start-lock-order.patch
-              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0003-log-authorization-requests.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0004-timer-thread-worker-signature.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0005-control-cumulative-ack.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0006-data-channel-loss-recovery.patch
@@ -31,6 +31,7 @@ FetchContent_Declare(ihslib
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0008-session-stream-stats.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0009-unreliable-fec.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0010-quality-and-bitrate.patch
+              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0011-client-video-caps.patch
         SOURCE_SUBDIR no-cmake)
 
 # protobuf-c runtime only; the generated .pb-c.c files ship with ihslib.

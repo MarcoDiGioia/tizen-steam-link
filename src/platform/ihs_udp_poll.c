@@ -66,8 +66,6 @@ struct IHS_UDPSocket {
     unsigned recvErrors;
     unsigned sendErrors;
     bool received;
-    bool sentUnicast;
-    bool sentBroadcast;
 };
 
 #ifndef __EMSCRIPTEN__
@@ -240,17 +238,6 @@ bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet) {
     bool ret = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, 0, (struct sockaddr *) &addr,
                       addrLen) > 0;
     int err = errno;
-    /* Log the first broadcast and the first unicast per socket, and every large datagram:
-     * discovery is about 30 bytes, pairing and streaming requests are a few hundred. */
-    bool broadcast = packet->address.ip.family == IHS_IPAddressFamilyIPv4 && packet->address.ip.v4.data[3] == 255;
-    bool *first = broadcast ? &s->sentBroadcast : &s->sentUnicast;
-    if (!*first || packet->buffer.size >= 200) {
-        *first = true;
-        const uint8_t *ip = packet->address.ip.v4.data;
-        PlatformLog(0, "socket %d: %s %zu bytes to %u.%u.%u.%u:%u (thread %lx)", s->fd, ret ? "sent" : "FAILED sending",
-                    packet->buffer.size, ip[0], ip[1], ip[2], ip[3], packet->address.port,
-                    (unsigned long) pthread_self());
-    }
     if (!ret && s->sendErrors++ % 100 == 0) {
         PlatformLog(1, "sendto() on socket %d failed: errno %d (%u so far)", s->fd, err, s->sendErrors);
     }

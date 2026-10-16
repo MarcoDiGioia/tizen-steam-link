@@ -47,18 +47,6 @@ Client::~Client() {
 
 bool Client::StartDiscovery(uint32_t intervalMs) { return IHS_ClientStartDiscovery(client_, intervalMs); }
 
-namespace {
-uint64_t TimerCheckRun(int, void *) {
-    Log(IHS_LogLevelInfo, "Client", "Timer thread is running tasks");
-    return 0;
-}
-}  // namespace
-
-void Client::CheckTimerThread() {
-    Log(IHS_LogLevelInfo, "Client", "Queueing a check task on the timer thread");
-    IHS_TimerTaskStart(client_->timers, TimerCheckRun, nullptr, 0, nullptr);
-}
-
 void Client::StopDiscovery() { IHS_ClientStopDiscovery(client_); }
 
 bool Client::Probe(const std::string &ip, uint16_t port) {

@@ -56,10 +56,6 @@ public:
 
     // Broadcast every intervalMs (0 = once).
     bool StartDiscovery(uint32_t intervalMs);
-
-    // Runs a one-off task on ihslib's timer thread, which sends discovery broadcasts and
-    // pairing and streaming requests, and logs when it ran.
-    void CheckTimerThread();
     void StopDiscovery();
 
     // Unicast discovery packet to one address. Steam answers with the same status

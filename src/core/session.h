@@ -37,6 +37,10 @@ struct SessionOptions {
     int quality = 0;
     // Bitrate to ask for in kbit/s; 0 = 30000, -1 = let Steam decide.
     int bitrateKbps = 0;
+    // Largest picture to ask for; 0 leaves Steam at 1920x1080. Pass the streaming request's
+    // maximum: that request alone doesn't lift the stream above 1080p.
+    int maxWidth = 0;
+    int maxHeight = 0;
 };
 
 struct SessionStats {
