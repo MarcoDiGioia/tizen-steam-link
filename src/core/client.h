@@ -2,7 +2,9 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "core/identity.h"
 #include "core/ihs.h"
@@ -17,7 +19,13 @@ struct Host {
 
     std::string hostname() const { return info.hostname; }
     std::string address() const { return IpToString(info.address.ip); }
+    // As Steam reports it, for Wake-on-LAN; empty if it didn't.
+    std::string macAddress() const { return info.macAddress; }
 };
+
+// The Wake-on-LAN magic packet for mac (six hex pairs, with or without separators): six 0xFF
+// bytes, then the MAC 16 times. Empty if mac isn't a MAC address.
+std::optional<std::array<uint8_t, 102>> WakePacket(const std::string &mac);
 
 struct StreamRequest {
     int maxWidth = 1920;
@@ -62,6 +70,11 @@ public:
     // message as for a broadcast, which ends up in OnHostFound. A subnet broadcast address
     // (192.168.1.255) works too.
     bool Probe(const std::string &ip, uint16_t port = kDiscoveryPort);
+
+    // Wake-on-LAN: the magic packet to 255.255.255.255 and to every local network's broadcast
+    // address, on port (and on 7 too when port is the usual 9). It works only where the
+    // computer's network card is set up for it. Opens a socket: not on the TV's main thread.
+    bool Wake(const std::string &mac, uint16_t port = 9);
 
     // Discovery to the broadcast address of every local IPv4 network. ihslib's own broadcast
     // goes to 255.255.255.255, which a Linux Steam host ignored in the ihslib fork's tests

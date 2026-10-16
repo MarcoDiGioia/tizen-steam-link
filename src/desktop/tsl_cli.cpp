@@ -272,9 +272,21 @@ public:
             decodeErrors_++;
             return 0;
         }
-        std::fwrite(pcm_.data(), sizeof(opus_int16), static_cast<size_t>(samples) * channels_, audio_);
-        pcmBytes_ += static_cast<uint32_t>(samples) * channels_ * sizeof(opus_int16);
+        lastSamples_ = samples;
+        WritePcm(samples);
         return 0;
+    }
+
+    // Same concealment as the TV player: up to 8 frames (80 ms) per gap.
+    void AudioLost(uint32_t frames) override {
+        if (opus_ == nullptr || audio_ == nullptr) return;
+        for (uint32_t i = 0; i < frames && i < 8; i++) {
+            int samples = opus_decode(opus_, nullptr, 0, pcm_.data(), lastSamples_, 0);
+            if (samples <= 0) break;
+            WritePcm(samples);
+            concealed_++;
+        }
+        lost_ += frames;
     }
 
     void AudioStop() override { CloseAudio(); }
@@ -293,8 +305,15 @@ public:
     const std::string &video_path() const { return videoPath_; }
     const std::string &audio_path() const { return audioPath_; }
     uint64_t decode_errors() const { return decodeErrors_; }
+    uint64_t audio_lost() const { return lost_; }
+    uint64_t audio_concealed() const { return concealed_; }
 
 private:
+    void WritePcm(int samples) {
+        std::fwrite(pcm_.data(), sizeof(opus_int16), static_cast<size_t>(samples) * channels_, audio_);
+        pcmBytes_ += static_cast<uint32_t>(samples) * channels_ * sizeof(opus_int16);
+    }
+
     void WriteWavHeader(uint32_t dataBytes) {
         auto le32 = [](uint8_t *p, uint32_t v) {
             for (int i = 0; i < 4; i++) p[i] = static_cast<uint8_t>(v >> (8 * i));
@@ -341,6 +360,8 @@ private:
     bool sawKeyframe_ = false;
     OpusDecoder *opus_ = nullptr;
     uint32_t channels_ = 2, rate_ = 48000, pcmBytes_ = 0;
+    int lastSamples_ = 480;
+    uint64_t lost_ = 0, concealed_ = 0;
     std::vector<opus_int16> pcm_;
     uint64_t decodeErrors_ = 0;
     std::atomic<bool> disconnected_{false}, finalized_{false};
@@ -352,6 +373,7 @@ void Usage() {
                  "\n"
                  "  discover [--seconds N]           list Steam hosts that answer a broadcast\n"
                  "  probe <ip> [--seconds N]         ask one host directly (no broadcast)\n"
+                 "  wake <mac> [--port N]            send a Wake-on-LAN packet (probe shows the MAC)\n"
                  "  pair <ip> [--pin NNNN] [--wait S] pair this device; type the PIN into Steam on the host\n"
                  "  stream <ip> [--seconds N] [--out DIR] [--hevc] [--no-audio] [--max WxH] [--input-test]\n"
                  "              [--quality auto|fast|balanced|beautiful] [--bitrate KBPS] [--no-fec]\n"
@@ -427,8 +449,22 @@ int CmdProbe(const tsl::Identity &identity, const Args &args) {
         std::fprintf(stderr, "No answer from %s\n", ip.c_str());
         return 1;
     }
-    std::printf("%s answered: %s (os=%d universe=%d games_running=%s)\n", ip.c_str(), host->info.hostname,
-                host->info.ostype, host->info.universe, host->info.gamesRunning ? "yes" : "no");
+    std::printf("%s answered: %s (os=%d universe=%d games_running=%s mac=%s)\n", ip.c_str(), host->info.hostname,
+                host->info.ostype, host->info.universe, host->info.gamesRunning ? "yes" : "no",
+                host->macAddress().empty() ? "-" : host->macAddress().c_str());
+    return 0;
+}
+
+int CmdWake(const tsl::Identity &identity, const Args &args) {
+    if (args.positional.size() < 2) return Usage(), 2;
+    Events events;
+    tsl::Client client(identity, &events);
+    int port = std::atoi(args.Get("--port", "9").c_str());
+    if (!client.Wake(args.positional[1], static_cast<uint16_t>(port))) {
+        std::fprintf(stderr, "Could not send the wake-up to %s\n", args.positional[1].c_str());
+        return 1;
+    }
+    std::printf("Sent Wake-on-LAN for %s\n", args.positional[1].c_str());
     return 0;
 }
 
@@ -586,14 +622,16 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
     std::printf("Video: %llu frames (%llu keyframes), %.1f MB, %ux%u, ~%.1f Mbit/s\n",
                 static_cast<unsigned long long>(s.videoFrames), static_cast<unsigned long long>(s.keyFrames),
                 s.videoBytes / 1e6, s.width, s.height, elapsed > 0 ? s.videoBytes * 8 / elapsed / 1e6 : 0.0);
-    std::printf("Audio: %llu packets, %llu bytes, %llu decode errors\n",
+    std::printf("Audio: %llu packets, %llu bytes, %llu decode errors, %llu lost (%llu filled in)\n",
                 static_cast<unsigned long long>(s.audioPackets), static_cast<unsigned long long>(s.audioBytes),
-                static_cast<unsigned long long>(sink.decode_errors()));
+                static_cast<unsigned long long>(sink.decode_errors()), static_cast<unsigned long long>(sink.audio_lost()),
+                static_cast<unsigned long long>(sink.audio_concealed()));
     uint32_t sent = s.videoPackets + s.videoPacketsLost;
     std::printf("Network: %u video packets, %u lost (%.2f%%), FEC %s (%u rebuilt, %u lost), "
                 "%u keyframe requests, round trip %.1f ms\n",
                 s.videoPackets, s.videoPacketsLost, sent > 0 ? 100.0 * s.videoPacketsLost / sent : 0.0,
                 s.fec ? "on" : "off", s.fecRecovered, s.fecUnrecoverable, s.lostReports, s.roundTripMs);
+    if (s.timedOut) std::printf("Ended: nothing from the host for 10 s\n");
     if (!sink.video_path().empty()) std::printf("Wrote %s\n", sink.video_path().c_str());
     if (!sink.audio_path().empty()) std::printf("Wrote %s\n", sink.audio_path().c_str());
     return s.videoFrames > 0 ? 0 : 1;
@@ -622,6 +660,8 @@ int main(int argc, char **argv) {
         rc = CmdDiscover(*identity, args);
     } else if (cmd == "probe") {
         rc = CmdProbe(*identity, args);
+    } else if (cmd == "wake") {
+        rc = CmdWake(*identity, args);
     } else if (cmd == "pair") {
         rc = CmdPair(*identity, dir, args);
     } else if (cmd == "stream") {

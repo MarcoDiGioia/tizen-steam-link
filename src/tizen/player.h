@@ -37,6 +37,7 @@ public:
         uint64_t audioFailed = 0;
         uint64_t silenceFilled = 0;
         uint64_t audioDropped = 0;
+        uint64_t audioConcealed = 0;
         // Diagnostics: what the platform player reported.
         uint64_t videoSessionChanges = 0;
         uint64_t videoTrackCloses = 0;
@@ -60,6 +61,7 @@ public:
     void VideoStop() override;
     int AudioStart(const IHS_StreamAudioConfig &config) override;
     int AudioPacket(const uint8_t *data, size_t len) override;
+    void AudioLost(uint32_t frames) override;
     void AudioStop() override;
 
     Counters counters() const;
@@ -98,6 +100,7 @@ private:
     bool WaitFor(std::chrono::milliseconds timeout, const std::function<bool()> &condition);
     Seconds Now() const;
     void AppendPcm(const int16_t *pcm, int samplesPerChannel);
+    void AppendDecoded(int samplesPerChannel);  // pcm_, audioMutex_ held
     void FillSilenceIfStarved();
 
     std::atomic<bool> hevc_{false};
@@ -129,12 +132,13 @@ private:
     OpusDecoder *opus_ = nullptr;
     int channels_ = 2;
     std::vector<int16_t> pcm_;
+    int lastSamples_ = 480;  // per frame, for concealment
     Seconds audioPts_{0};
     std::chrono::steady_clock::time_point lastAudio_;
 
     std::atomic<uint64_t> videoAppended_{0}, videoFailed_{0}, audioAppended_{0}, audioFailed_{0}, silence_{0},
             audioDropped_{0};
-    std::atomic<uint64_t> videoSessionChanges_{0}, videoTrackCloses_{0}, pipelineErrors_{0};
+    std::atomic<uint64_t> videoSessionChanges_{0}, videoTrackCloses_{0}, pipelineErrors_{0}, audioConcealed_{0};
     std::atomic<int> lastCloseReason_{-1}, lastAppendError_{0}, lastPipelineError_{-1};
 };
 

@@ -13,6 +13,8 @@
 
 extern "C" {
 #include "client/client_pri.h"
+#include "ihs_buffer.h"
+#include "ihs_udp.h"
 }
 
 namespace tsl {
@@ -67,21 +69,84 @@ bool Client::Probe(const std::string &ip, uint16_t port) {
                           reinterpret_cast<ProtobufCMessage *>(&discovery));
 }
 
-int Client::ProbeLocalBroadcasts() {
-    int sent = 0;
+std::optional<std::array<uint8_t, 102>> WakePacket(const std::string &mac) {
+    uint8_t bytes[6];
+    int digits = 0;
+    for (char c : mac) {
+        int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (v < 0) {
+            if (c == ':' || c == '-' || c == '.') continue;
+            return std::nullopt;
+        }
+        if (digits == 12) return std::nullopt;
+        if (digits % 2 == 0) {
+            bytes[digits / 2] = static_cast<uint8_t>(v << 4);
+        } else {
+            bytes[digits / 2] |= static_cast<uint8_t>(v);
+        }
+        digits++;
+    }
+    if (digits != 12) return std::nullopt;
+    std::array<uint8_t, 102> packet{};
+    std::memset(packet.data(), 0xff, 6);
+    for (int i = 0; i < 16; i++) std::memcpy(packet.data() + 6 + i * 6, bytes, 6);
+    return packet;
+}
+
+namespace {
+std::vector<std::string> LocalBroadcastAddresses() {
+    std::vector<std::string> addresses;
 #if !defined(__EMSCRIPTEN__)
     struct ifaddrs *list = nullptr;
-    if (getifaddrs(&list) != 0) return 0;
+    if (getifaddrs(&list) != 0) return addresses;
     for (struct ifaddrs *ifa = list; ifa != nullptr; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == nullptr || ifa->ifa_addr->sa_family != AF_INET) continue;
         if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_BROADCAST) || (ifa->ifa_flags & IFF_LOOPBACK)) continue;
         if (ifa->ifa_broadaddr == nullptr) continue;
         char buf[INET_ADDRSTRLEN];
         const auto *addr = reinterpret_cast<const struct sockaddr_in *>(ifa->ifa_broadaddr);
-        if (inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf)) != nullptr && Probe(buf)) sent++;
+        if (inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf)) != nullptr) addresses.emplace_back(buf);
     }
     freeifaddrs(list);
 #endif
+    return addresses;
+}
+}  // namespace
+
+bool Client::Wake(const std::string &mac, uint16_t port) {
+    auto packet = WakePacket(mac);
+    if (!packet) {
+        Log(IHS_LogLevelWarn, "Client", "Not a MAC address: %s", mac.c_str());
+        return false;
+    }
+    IHS_UDPSocket *socket = IHS_UDPSocketOpen(true);
+    if (socket == nullptr) return false;
+    std::vector<std::string> targets = LocalBroadcastAddresses();
+    targets.insert(targets.begin(), "255.255.255.255");
+    std::vector<uint16_t> ports = {port};
+    if (port == 9) ports.push_back(7);
+    int sent = 0;
+    for (const auto &target : targets) {
+        for (uint16_t p : ports) {
+            IHS_UDPPacket udp{};
+            if (!IHS_IPAddressFromString(&udp.address.ip, target.c_str())) continue;
+            udp.address.port = p;
+            IHS_BufferInit(&udp.buffer, packet->size(), packet->size());
+            IHS_BufferAppendMem(&udp.buffer, packet->data(), packet->size());
+            if (IHS_UDPSocketSend(socket, &udp)) sent++;
+            IHS_BufferClear(&udp.buffer, true);
+        }
+    }
+    IHS_UDPSocketClose(socket);
+    Log(IHS_LogLevelInfo, "Client", "Wake-on-LAN for %s: %d packets sent", mac.c_str(), sent);
+    return sent > 0;
+}
+
+int Client::ProbeLocalBroadcasts() {
+    int sent = 0;
+    for (const auto &address : LocalBroadcastAddresses()) {
+        if (Probe(address)) sent++;
+    }
     return sent;
 }
 

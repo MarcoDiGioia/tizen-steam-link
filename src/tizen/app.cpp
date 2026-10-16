@@ -30,6 +30,7 @@
 #include "core/keymap.h"
 #include "core/log.h"
 #include "core/session.h"
+#include "samsung/wasm/emss_version_info.h"
 #include "tizen/player.h"
 
 namespace tsl {
@@ -92,7 +93,7 @@ std::string HostJson(const Host &host) {
     return "{\"ip\":" + Quote(host.address()) + ",\"hostname\":" + Quote(host.hostname()) +
            ",\"ostype\":" + std::to_string(host.info.ostype) + ",\"universe\":" +
            std::to_string(host.info.universe) + ",\"gamesRunning\":" + (host.info.gamesRunning ? "true" : "false") +
-           "}";
+           ",\"mac\":" + Quote(host.macAddress()) + "}";
 }
 
 // A single thread that runs posted jobs in order.
@@ -166,6 +167,13 @@ public:
     }
 
     bool Probe(const std::string &ip) { return client_ && client_->Probe(ip); }
+
+    // Sockets block: off the main thread.
+    bool Wake(const std::string &mac) {
+        if (!client_ || !WakePacket(mac)) return false;
+        worker_.Post([this, mac] { client_->Wake(mac); });
+        return true;
+    }
 
     bool Pair(const std::string &ip, const std::string &pin) {
         if (!client_) return false;
@@ -280,7 +288,8 @@ public:
                std::to_string(c.videoSessionChanges) + ",\"videoTrackCloses\":" + std::to_string(c.videoTrackCloses) +
                ",\"lastCloseReason\":" + std::to_string(c.lastCloseReason) + ",\"lastAppendError\":" +
                std::to_string(c.lastAppendError) + ",\"pipelineErrors\":" + std::to_string(c.pipelineErrors) +
-               ",\"lastPipelineError\":" + std::to_string(c.lastPipelineError) + "}";
+               ",\"lastPipelineError\":" + std::to_string(c.lastPipelineError) + ",\"audioConcealed\":" +
+               std::to_string(c.audioConcealed) + "}";
     }
 
     // Client::Listener (ihslib client thread)
@@ -401,7 +410,9 @@ public:
 
     void OnSessionDisconnected() override {
         streaming_ = false;
-        PostEvent("streamDisconnected", "{}");
+        auto session = CurrentSession();
+        bool timedOut = session && session->Stats().timedOut;
+        PostEvent("streamDisconnected", std::string("{\"timedOut\":") + (timedOut ? "true" : "false") + "}");
     }
 
     void OnSessionFinalized() override {
@@ -542,6 +553,7 @@ bool Init(const std::string &identity) { return g_app->Init(identity); }
 void StartDiscovery() { g_app->StartDiscovery(); }
 void StopDiscovery() { g_app->StopDiscovery(); }
 bool Probe(const std::string &ip) { return g_app->Probe(ip); }
+bool Wake(const std::string &mac) { return g_app->Wake(mac); }
 bool Pair(const std::string &ip, const std::string &pin) { return g_app->Pair(ip, pin); }
 void CancelPair() { g_app->CancelPair(); }
 
@@ -592,9 +604,11 @@ int main() {
             return 0;
         }
     });
-    tsl::Log(IHS_LogLevelInfo, "Player", "%s latency mode (codec setting %s)", hevc ? "Low" : "Ultra low",
-             hevc ? "HEVC" : "H.264");
-    tsl::g_app = new tsl::App(hevc ? samsung::wasm::EmssLatencyMode::kLow : samsung::wasm::EmssLatencyMode::kUltraLow);
+    // Older TVs may lack the ultra low latency mode altogether.
+    bool ultraLow = !hevc && samsung::wasm::EmssVersionInfo::Create().has_ultra_low_latency;
+    tsl::Log(IHS_LogLevelInfo, "Player", "%s latency mode (codec setting %s%s)", ultraLow ? "Ultra low" : "Low",
+             hevc ? "HEVC" : "H.264", !hevc && !ultraLow ? ", no ultra low latency mode on this TV" : "");
+    tsl::g_app = new tsl::App(ultraLow ? samsung::wasm::EmssLatencyMode::kUltraLow : samsung::wasm::EmssLatencyMode::kLow);
     EM_ASM({
         if (typeof window.tslReady === 'function') window.tslReady();
     });
@@ -607,6 +621,7 @@ EMSCRIPTEN_BINDINGS(tsl) {
     emscripten::function("startDiscovery", &tsl::StartDiscovery);
     emscripten::function("stopDiscovery", &tsl::StopDiscovery);
     emscripten::function("probe", &tsl::Probe);
+    emscripten::function("wake", &tsl::Wake);
     emscripten::function("pair", &tsl::Pair);
     emscripten::function("cancelPair", &tsl::CancelPair);
     emscripten::function("startStream", &tsl::StartStream);

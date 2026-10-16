@@ -484,6 +484,31 @@ int PollFrame(IHS_SessionPacketsWindow *window) {
     return id;
 }
 
+void TestWakePacket() {
+    auto packet = tsl::WakePacket("00:1A-2b.3C4d5E");
+    CHECK(packet.has_value());
+    if (packet) {
+        static const uint8_t mac[6] = {0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e};
+        for (int i = 0; i < 6; i++) CHECK_EQ((*packet)[i], 0xff);
+        bool repeated = true;
+        for (int i = 0; i < 16; i++) repeated = repeated && std::memcmp(packet->data() + 6 + i * 6, mac, 6) == 0;
+        CHECK(repeated);
+    }
+    CHECK(!tsl::WakePacket("").has_value());
+    CHECK(!tsl::WakePacket("00:1a:2b:3c:4d").has_value());        // 5 bytes
+    CHECK(!tsl::WakePacket("00:1a:2b:3c:4d:5e:6f").has_value());  // 7 bytes
+    CHECK(!tsl::WakePacket("00:1a:2b:3c:4d:zz").has_value());
+
+    // Whether it arrives depends on the firewall (ufw drops broadcasts to other ports), so
+    // only the send is checked here.
+    uint8_t random[tsl::Identity::kRandomBytes] = {4};
+    tsl::Identity id = tsl::Identity::FromRandom(random, "wake-test");
+    ProbeListener listener;
+    tsl::Client client(id, &listener);
+    CHECK(client.Wake("00:1a:2b:3c:4d:5e", 40009));
+    CHECK(!client.Wake("not a mac"));
+}
+
 void TestPacketWindowContiguousId() {
     IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(16);
     uint16_t id = 0;
@@ -711,6 +736,13 @@ int CaptureAudioSubmit(IHS_Session *, IHS_Buffer *data, void *context) {
 
 void CaptureAudioStop(IHS_Session *, void *) {}
 
+// Lost frames go in as -count.
+void CaptureAudioLost(IHS_Session *, uint32_t frames, void *context) {
+    auto *capture = static_cast<AudioCapture *>(context);
+    std::lock_guard<std::mutex> lock(capture->mutex);
+    capture->payloads.push_back(-static_cast<int>(frames));
+}
+
 // The data channel's worker must get past a lost packet. It used to wait behind it until its
 // window (256 packets for audio) overflowed, so the packets after a loss came seconds late.
 void TestDataChannelGetsPastLostPacket() {
@@ -729,6 +761,7 @@ void TestDataChannelGetsPastLostPacket() {
             .start = CaptureAudioStart,
             .submit = CaptureAudioSubmit,
             .stop = CaptureAudioStop,
+            .lost = CaptureAudioLost,
     };
     IHS_SessionSetAudioCallbacks(session, &callbacks, &capture);
     CStartAudioDataMsg start = CSTART_AUDIO_DATA_MSG__INIT;
@@ -739,7 +772,8 @@ void TestDataChannelGetsPastLostPacket() {
     IHS_SessionChannel *channel = IHS_SessionChannelDataAudioCreate(session, &start);
 
     // Packets 10 ms apart, well inside the 200 ms after which stale packets are discarded.
-    auto send = [&](uint16_t id, int16_t fragments, bool fragment) {
+    // frame: the data frame id, one per audio frame; the packet id counts packets.
+    auto send = [&](uint16_t id, uint16_t frame, int16_t fragments, bool fragment) {
         IHS_SessionPacket packet{};
         packet.header.type = fragment ? IHS_SessionPacketTypeUnreliableFrag : IHS_SessionPacketTypeUnreliable;
         packet.header.channelId = static_cast<IHS_SessionChannelId>(start.channel);
@@ -747,23 +781,25 @@ void TestDataChannelGetsPastLostPacket() {
         packet.header.packetId = id;
         packet.header.sendTimestamp = IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(1000 + id * 10);
         // k_EStreamDataPacket, the 12-byte data frame header, then the payload: the packet id.
-        uint8_t body[1 + 12 + 1] = {k_EStreamDataPacket};
+        uint8_t body[1 + 12 + 1] = {k_EStreamDataPacket, static_cast<uint8_t>(frame), static_cast<uint8_t>(frame >> 8)};
         body[13] = static_cast<uint8_t>(id);
         IHS_BufferInit(&packet.body, sizeof(body), sizeof(body));
         IHS_BufferAppendMem(&packet.body, body, sizeof(body));
         IHS_SessionChannelDataReceived(channel, &packet);
         IHS_BufferClear(&packet.body, true);
     };
-    send(0, 0, false);
-    send(1, 2, false);  // a frame of packets 1, 2 and 3; 2 is lost
-    send(3, 0, true);
-    send(4, 0, false);
-    // 5 is lost: a one-packet frame
-    for (uint16_t id = 6; id < 10; id++) send(id, 0, false);
+    send(0, 0, 0, false);
+    send(1, 1, 2, false);  // frame 1, packets 1, 2 and 3; 2 is lost
+    send(3, 1, 0, true);
+    send(4, 2, 0, false);
+    // packet 5, frame 3, is lost
+    for (uint16_t id = 6; id < 10; id++) send(id, static_cast<uint16_t>(id - 2), 0, false);
+    send(10, 3, 0, false);  // frame 3 after all, too late: dropped
     {
         std::unique_lock<std::mutex> lock(capture.mutex);
-        capture.cond.wait_for(lock, std::chrono::seconds(1), [&] { return capture.payloads.size() >= 6; });
-        CHECK(capture.payloads == (std::vector<int>{0, 4, 6, 7, 8, 9}));
+        capture.cond.wait_for(lock, std::chrono::seconds(1), [&] { return capture.payloads.size() >= 8; });
+        // Each lost frame is reported where it belongs, before the frame after it.
+        CHECK(capture.payloads == (std::vector<int>{0, -1, 4, -1, 6, 7, 8, 9}));
     }
     IHS_SessionChannelStop(channel);
     IHS_SessionChannelDestroy(channel);
@@ -790,6 +826,7 @@ int main() {
     TestPacketWindowSkipLost();
     TestFec();
     TestDataChannelGetsPastLostPacket();
+    TestWakePacket();
     IHS_Quit();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

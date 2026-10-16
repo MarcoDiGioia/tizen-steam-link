@@ -1,0 +1,21 @@
+Poll HID devices at 250 Hz.
+
+The HID manager polled every 8 ms. A poll sends only what changed since the last one, so
+polling twice as often adds little traffic, and a button press waits 2 ms on average for the
+next poll instead of 4.
+
+diff --git a/src/hid/manager.c b/src/hid/manager.c
+index 8f4594f..58de065 100644
+--- a/src/hid/manager.c
++++ b/src/hid/manager.c
+@@ -32,7 +32,9 @@
+ #include "protobuf/pb_utils.h"
+ #include "session/session_pri.h"
+ 
+-#define HID_POLL_INTERVAL_MS 8u
++/* 250 Hz. Every poll sends only what changed, so a faster poll adds little traffic, and a
++ * button press waits 2 ms on average for it instead of 4. */
++#define HID_POLL_INTERVAL_MS 4u
+ 
+ static uint64_t HIDPollTick(int runCount, void *context);
+ 

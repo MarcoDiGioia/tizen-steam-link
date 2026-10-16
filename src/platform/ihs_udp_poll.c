@@ -16,8 +16,10 @@
  *  - Problems are reported through TSL_PlatformLogHook (set by the app's logging) instead
  *    of being dropped.
  *  - Desktop builds only: TSL_TEST_RECV_LOSS=<percent> drops that share of incoming
- *    datagrams of LOSS_MIN_BYTES or more (video; audio and control messages are smaller),
- *    to reproduce Wi-Fi packet loss on a wired network.
+ *    datagrams of TSL_TEST_RECV_LOSS_MIN_BYTES (1000 by default: video; audio and control
+ *    messages are smaller) or more, to reproduce Wi-Fi packet loss on a wired network.
+ *    TSL_TEST_RECV_BLACKOUT_AFTER=<seconds> drops everything from then on, like a host
+ *    that went to sleep.
  *
  * Address conversion is the same as ihslib's POSIX backend.
  */
@@ -36,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_TIMEOUT_MS 50
@@ -69,16 +72,26 @@ struct IHS_UDPSocket {
 };
 
 #ifndef __EMSCRIPTEN__
-#define LOSS_MIN_BYTES 1000
 static pthread_once_t lossOnce = PTHREAD_ONCE_INIT;
 static double lossPercent = 0;
+static long lossMinBytes = 1000;
+static double blackoutAfter = -1;
+static struct timespec lossStart;
 
 static void LossInit(void) {
     const char *value = getenv("TSL_TEST_RECV_LOSS");
     if (value != NULL) lossPercent = atof(value);
+    const char *minBytes = getenv("TSL_TEST_RECV_LOSS_MIN_BYTES");
+    if (minBytes != NULL) lossMinBytes = atol(minBytes);
+    const char *blackout = getenv("TSL_TEST_RECV_BLACKOUT_AFTER");
+    if (blackout != NULL) {
+        blackoutAfter = atof(blackout);
+        PlatformLog(1, "Test hook: receiving nothing after %.1f s", blackoutAfter);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &lossStart);
     if (lossPercent > 0) {
-        PlatformLog(1, "Test hook: dropping %.2f%% of incoming datagrams of %d bytes or more", lossPercent,
-                    LOSS_MIN_BYTES);
+        PlatformLog(1, "Test hook: dropping %.2f%% of incoming datagrams of %ld bytes or more", lossPercent,
+                    lossMinBytes);
     }
 }
 
@@ -97,6 +110,11 @@ static __thread unsigned lossRecentCount;
 
 static bool LossDrop(const uint8_t *data, ssize_t len) {
     pthread_once(&lossOnce, LossInit);
+    if (blackoutAfter >= 0) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((now.tv_sec - lossStart.tv_sec) + (now.tv_nsec - lossStart.tv_nsec) / 1e9 >= blackoutAfter) return true;
+    }
     if (lossPercent <= 0 || len < 13) return false;
     unsigned type = data[0] & 0x7f;
     /* Session packets only: discovery datagrams start with 0xff. */
@@ -114,7 +132,7 @@ static bool LossDrop(const uint8_t *data, ssize_t len) {
         }
     }
     if (data[1] > 0) LossLog("retransmitted", data, len);
-    if (len < LOSS_MIN_BYTES) return false;
+    if (len < lossMinBytes) return false;
     static __thread unsigned seed = 1;
     if (rand_r(&seed) >= lossPercent / 100.0 * RAND_MAX) return false;
     lossRecent[lossRecentCount++ % LOSS_RECENT] = key;

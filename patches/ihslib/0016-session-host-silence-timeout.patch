@@ -1,0 +1,117 @@
+End the session when the host goes silent.
+
+Nothing noticed a host that simply stopped sending: a Steam Deck put to sleep mid-stream left
+the session connected forever, with the last picture on screen. A connected host sends video,
+audio and stats all the time, so the session now notes when the last packet arrived, and a
+one-second timer task disconnects it after 10 s without one. IHS_SessionStreamStats.timedOut
+tells the app it ended that way rather than by request (the host's own Disconnect packet
+still ends it as before). The task runs while the session worker does and is stopped
+synchronously in SessionFinalized; it never ends by itself, so that stop can't hit a task
+already freed.
+
+diff --git a/include/ihslib/session.h b/include/ihslib/session.h
+index 1909759..b505b41 100644
+--- a/include/ihslib/session.h
++++ b/include/ihslib/session.h
+@@ -231,6 +231,8 @@ typedef struct IHS_SessionStreamStats {
+     uint32_t fecRecovered;
+     /** Video messages lost despite FEC (more shards missing than the parity covers). */
+     uint32_t fecUnrecoverable;
++    /** The session ended because the host went silent (no packets for 10 s), not by request. */
++    bool timedOut;
+ } IHS_SessionStreamStats;
+ 
+ void IHS_SessionGetStreamStats(const IHS_Session *session, IHS_SessionStreamStats *stats);
+diff --git a/src/session/session.c b/src/session/session.c
+index 0230b7c..dc287b7 100644
+--- a/src/session/session.c
++++ b/src/session/session.c
+@@ -55,6 +55,12 @@ static void SessionFinalized(IHS_Base *base, void *context);
+ 
+ static void SessionSendWorker(void *context);
+ 
++static uint64_t LivenessRun(int runCount, void *context);
++
++/* A connected host sends video, audio and stats all the time; this long without a packet means
++ * it is gone (asleep, unplugged, out of range). */
++#define HOST_SILENCE_TIMEOUT_MS 10000u
++
+ static QueuedPacket *QueuedPacketCreate(IHS_Session *session, IHS_SessionPacket *packet);
+ 
+ static void QueuedPacketDestroy(QueuedPacket *queued, void *unused);
+@@ -207,6 +213,7 @@ void IHS_SessionGetStreamStats(const IHS_Session *session, IHS_SessionStreamStat
+     stats->videoPacketsLost += IHS_SessionCounterGet(session->counters.fecShardsLost);
+     stats->fecRecovered = IHS_SessionCounterGet(session->counters.fecRecovered);
+     stats->fecUnrecoverable = IHS_SessionCounterGet(session->counters.fecUnrecoverable);
++    stats->timedOut = IHS_SessionCounterGet(session->timedOut);
+ }
+ 
+ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
+@@ -218,6 +225,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
+         IHS_SessionLog(session, IHS_LogLevelDebug, "Session", "Discarding packet. Reason: %u", ret);
+         return;
+     }
++    IHS_SessionCounterSet(session->lastReceivedMs, (uint32_t) IHS_TimerNow());
+ 
+     IHS_SessionChannelId channelId = packet.header.channelId;
+     IHS_SessionPacketType packetType = packet.header.type;
+@@ -253,6 +261,9 @@ static void SessionInitialized(IHS_Base *base, void *context) {
+     session->state.connectionState = IHS_SessionConnectionStateConnecting;
+     IHS_BaseUnlock(&session->base);
+ 
++    IHS_SessionCounterSet(session->lastReceivedMs, (uint32_t) IHS_TimerNow());
++    session->livenessTask = IHS_TimerTaskStart(session->timers, LivenessRun, NULL, 1000, session);
++
+     /* crc32c(b'Connect') */
+     const static uint8_t body[4] = {0xc7, 0x3d, 0x8f, 0x3c};
+ 
+@@ -267,6 +278,11 @@ static void SessionInitialized(IHS_Base *base, void *context) {
+ static void SessionFinalized(IHS_Base *base, void *context) {
+     (void) context;
+     IHS_Session *session = (IHS_Session *) base;
++    if (session->livenessTask != NULL) {
++        // Synchronous, so the task can't run on the timer thread after this.
++        IHS_TimerTaskStopImmediate(session->livenessTask);
++        session->livenessTask = NULL;
++    }
+     IHS_ThreadJoin(session->sendThread);
+     session->sendThread = NULL;
+     if (session->callbacks.session && session->callbacks.session->finalized) {
+@@ -274,6 +290,22 @@ static void SessionFinalized(IHS_Base *base, void *context) {
+     }
+ }
+ 
++// Never ends by itself (returns its interval), so SessionFinalized can always stop it.
++static uint64_t LivenessRun(int runCount, void *context) {
++    (void) runCount;
++    IHS_Session *session = context;
++    IHS_BaseLock(&session->base);
++    bool connected = session->state.connectionState == IHS_SessionConnectionStateConnected;
++    IHS_BaseUnlock(&session->base);
++    uint32_t silent = (uint32_t) IHS_TimerNow() - IHS_SessionCounterGet(session->lastReceivedMs);
++    if (connected && silent >= HOST_SILENCE_TIMEOUT_MS && !IHS_SessionCounterGet(session->timedOut)) {
++        IHS_SessionCounterSet(session->timedOut, true);
++        IHS_SessionLog(session, IHS_LogLevelWarn, "Session", "Nothing from the host for %u ms, disconnecting", silent);
++        IHS_SessionDisconnect(session);
++    }
++    return 1000;
++}
++
+ static void SessionSendWorker(void *context) {
+     IHS_Session *session = (IHS_Session *) context;
+     while (!session->base.interrupted) {
+diff --git a/src/session/session_pri.h b/src/session/session_pri.h
+index 1802ab4..3300c3b 100644
+--- a/src/session/session_pri.h
++++ b/src/session/session_pri.h
+@@ -108,6 +108,10 @@ struct IHS_Session {
+     IHS_HIDManager *hidManager;
+     struct IHS_FrameStatsAggregator *frameStats;
+     IHS_SessionCounters counters;
++    /* Liveness: IHS_TimerNow() of the last packet received (low 32 bits), checked every second. */
++    uint32_t lastReceivedMs;
++    bool timedOut;
++    IHS_TimerTask *livenessTask;
+     struct {
+         const IHS_StreamSessionCallbacks *session;
+         const IHS_StreamAudioCallbacks *audio;

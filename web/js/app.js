@@ -50,10 +50,14 @@
     var PAIR_NO_ANSWER_MS = 8000;
     var LOG_LINES = 40;
     var BACK_HOLD_MS = 1000;
+    var MAX_RECONNECTS = 2;
+    var RECONNECT_WAIT_MS = 15000;
+    var RECONNECT_RESET_MS = 60000;
 
     var mod = null;  // WASM module, once ready
     var state = {
         hosts: {},
+        reconnects: 0,  // automatic reconnects in a row
         settings: {},
         scope: null,
         userMoved: false,
@@ -96,7 +100,7 @@
             var h = state.hosts[ip];
             if (h.paired || h.manual) {
                 saved.push({ip: h.ip, hostname: h.hostname, steamId: h.steamId, key: h.key, paired: h.paired,
-                    manual: h.manual});
+                    manual: h.manual, mac: h.mac || ''});
             }
         });
         store.set('hosts', saved);
@@ -113,6 +117,7 @@
             state.hosts[h.ip] = {
                 ip: h.ip, hostname: h.hostname || h.ip, steamId: h.steamId || '', key: key,
                 paired: !!h.paired && key !== '', manual: !!h.manual, lastSeen: 0, gamesRunning: false,
+                mac: typeof h.mac === 'string' ? h.mac : '',
             };
         });
     }
@@ -301,7 +306,8 @@
         if (state.scope === $('#home')) {
             var host = el.hasAttribute('data-ip') && state.hosts[el.getAttribute('data-ip')];
             if (host) {
-                return [['ok', host.paired ? 'Stream' : 'Pair'], ['forget', 'Forget'], ['back', 'Exit']];
+                return [['ok', canWake(host) ? 'Wake' : host.paired ? 'Stream' : 'Pair'], ['forget', 'Forget'],
+                    ['back', 'Exit']];
             }
             return [['ok', 'Select'], ['back', 'Exit']];
         }
@@ -346,7 +352,10 @@
         } else if (host) {
             title = host.hostname;
             var st = hostState(host).cls;
-            if (st === 'offline') {
+            if (st === 'offline' && host.mac) {
+                line = 'Not answering. Select it to send a wake-up (Wake-on-LAN, if the computer has it on). ' +
+                    'Otherwise start Steam on it, on the same network as the TV.';
+            } else if (st === 'offline') {
                 line = 'Not answering. Start Steam on it, and check that it is on the same network as the TV.';
             } else if (st === 'unpaired') {
                 line = 'Not paired with this TV yet. Select it to get a PIN, then type the PIN into Steam on ' +
@@ -365,6 +374,11 @@
 
     function hostOnline(h) {
         return Date.now() - h.lastSeen < ONLINE_MS;
+    }
+
+    // An offline computer that reported its MAC address while it was online can get a wake-up.
+    function canWake(h) {
+        return !!h.mac && !hostOnline(h);
     }
 
     // Steam Link's wording for a computer's state.
@@ -455,6 +469,12 @@
         if (action === 'settings') return openSettings();
         var host = state.hosts[el.getAttribute('data-ip')];
         if (!host) return;
+        if (canWake(host)) {
+            mod.wake(host.mac);
+            note('wake-up sent to ' + host.hostname + ' (' + host.mac + ')');
+            toast('Sent a wake-up to ' + host.hostname + '. It shows up here once Steam is running.');
+            return;
+        }
         if (host.paired) {
             startStream(host);
         } else {
@@ -676,6 +696,25 @@
         if (!ok) streamFailed('Could not contact ' + host.hostname + '.');
     }
 
+    // After a lost connection: stream again once the computer answers.
+    function resumeStream(ip) {
+        var host = state.hosts[ip];
+        if (!host || !host.paired) return;
+        toast('Reconnecting to ' + host.hostname + '…');
+        var deadline = Date.now() + RECONNECT_WAIT_MS;
+        (function wait() {
+            if (state.stream) return;
+            if (hostOnline(host)) {
+                startStream(host);
+            } else if (Date.now() < deadline) {
+                setTimeout(wait, 500);
+            } else {
+                state.reconnects = 0;
+                toast(host.hostname + ' isn\'t answering. It may be asleep or off the network.', true);
+            }
+        })();
+    }
+
     // Before any session exists: just go back to the list.
     function streamFailed(reason) {
         if (!state.stream) return;
@@ -735,7 +774,8 @@
             'sessions ' + (st.videoSessionChanges || 0) + ', closes ' + (st.videoTrackCloses || 0) +
             (st.lastCloseReason >= 0 ? ' (reason ' + st.lastCloseReason + ')' : '') +
             ', append error ' + (st.lastAppendError || 0) + ', pipeline errors ' + (st.pipelineErrors || 0) +
-            (st.lastPipelineError >= 0 ? ' (' + st.lastPipelineError + ')' : '');
+            (st.lastPipelineError >= 0 ? ' (' + st.lastPipelineError + ')' : '') +
+            '\naudio: ' + (st.audioAppended || 0) + ' frames, ' + (st.audioConcealed || 0) + ' lost ones filled in';
     }
 
     function updateStats() {
@@ -957,14 +997,16 @@
             var h = state.hosts[d.ip];
             if (!h) {
                 h = state.hosts[d.ip] = {ip: d.ip, hostname: d.hostname, steamId: '', key: '', paired: false,
-                    manual: false, lastSeen: 0, gamesRunning: false};
+                    manual: false, lastSeen: 0, gamesRunning: false, mac: ''};
             }
             var renamed = h.hostname !== d.hostname;
             h.hostname = d.hostname;
             h.lastSeen = Date.now();
             h.gamesRunning = !!d.gamesRunning;
             h.ostype = d.ostype;
-            if (renamed && (h.paired || h.manual)) saveHosts();
+            var newMac = !!d.mac && d.mac !== h.mac;
+            if (d.mac) h.mac = d.mac;
+            if ((renamed || newMac) && (h.paired || h.manual)) saveHosts();
             if (!h.noted) {
                 h.noted = true;
                 note('found ' + d.hostname + ' at ' + d.ip);
@@ -1024,6 +1066,10 @@
             if (!s) return;
             s.connected = true;
             clearTimeout(s.timeout);
+            // A stream that held up for a while starts the reconnect count over.
+            s.reconnectReset = setTimeout(function () {
+                state.reconnects = 0;
+            }, RECONNECT_RESET_MS);
             $('#stream-status').hidden = true;
             var hint = $('#stream-hint');
             hint.hidden = false;
@@ -1033,17 +1079,26 @@
             $('#stream-stats').hidden = !state.settings.stats;
             s.statsTimer = setInterval(updateStats, 1000);
         });
-        tsl.on('streamDisconnected', function () {
+        tsl.on('streamDisconnected', function (d) {
             var s = state.stream;
             if (!s) return;
             s.connected = false;
             if (!s.ending) {
                 s.ending = true;
+                // The host going silent (Wi-Fi, a blip on its side) gets a reconnect, a few times in
+                // a row at most; the host ending the stream itself doesn't.
+                var retry = d && d.timedOut && state.reconnects < MAX_RECONNECTS;
                 try {
-                    sessionStorage.setItem('tsl.message', s.hostname + ' ended the stream.');
+                    if (retry) {
+                        sessionStorage.setItem('tsl.reconnect', JSON.stringify({ip: s.ip, count: state.reconnects + 1}));
+                    } else {
+                        sessionStorage.setItem('tsl.message', d && d.timedOut
+                            ? 'Lost the connection to ' + s.hostname + '.'
+                            : s.hostname + ' ended the stream.');
+                    }
                 } catch (e) { /* not important */ }
-                showStreamStatus('Disconnected');
-                setTimeout(reloadPage, 6000);
+                showStreamStatus(retry ? 'Connection lost, reconnecting…' : 'Disconnected');
+                setTimeout(reloadPage, retry ? 1500 : 6000);
             }
         });
         tsl.on('streamEnded', function () {
@@ -1162,12 +1217,15 @@
         setInterval(updateClock, 10000);
         $('#footer-left').textContent = 'Unofficial client · not affiliated with Valve';
 
-        var message = null;
+        var message = null, reconnect = null;
         try {
             message = sessionStorage.getItem('tsl.message');
             sessionStorage.removeItem('tsl.message');
+            reconnect = JSON.parse(sessionStorage.getItem('tsl.reconnect') || 'null');
+            sessionStorage.removeItem('tsl.reconnect');
         } catch (e) { /* not important */ }
         if (message) toast(message);
+        state.reconnects = reconnect ? reconnect.count : 0;
 
         tsl.ready.then(function (m) {
             var identity = store.get('identity', null);
@@ -1187,6 +1245,7 @@
             findLocalBroadcasts();
             mod.startDiscovery();
             probeSaved();
+            if (reconnect) resumeStream(reconnect.ip);
             setInterval(probeSaved, 4000);
             setInterval(scheduleRender, 3000);
         });

@@ -24,6 +24,9 @@ public:
     // Return 0 to accept the stream. Steam sends Opus.
     virtual int AudioStart(const IHS_StreamAudioConfig &config) = 0;
     virtual int AudioPacket(const uint8_t *data, size_t len) = 0;
+    // Frames that never arrived, where they belong (before the next AudioPacket). Opus fills
+    // a gap when decoding without data.
+    virtual void AudioLost(uint32_t frames) { (void) frames; }
     virtual void AudioStop() = 0;
 };
 
@@ -64,6 +67,8 @@ struct SessionStats {
     bool fec = false;
     uint32_t fecRecovered = 0;
     uint32_t fecUnrecoverable = 0;
+    // The session ended because the host went silent, not by request.
+    bool timedOut = false;
 };
 
 // One streaming session. Create it from Client::Listener::OnStreamReady, Connect(), and
@@ -122,6 +127,7 @@ private:
     static void CbTargetBitrate(IHS_Session *session, int32_t bitrate, void *context);
     static int CbAudioStart(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);
     static int CbAudioSubmit(IHS_Session *session, IHS_Buffer *data, void *context);
+    static void CbAudioLost(IHS_Session *session, uint32_t frames, void *context);
     static void CbAudioStop(IHS_Session *session, void *context);
     static bool CbSetCursor(IHS_Session *session, uint64_t cursorId, void *context);
     static void CbShowCursor(IHS_Session *session, float x, float y, void *context);

@@ -34,13 +34,14 @@ Dependencies (ihslib, mbedTLS 3.6, protobuf-c, Opus) are downloaded by CMake at 
 versions and checked by hash. Nothing is installed system-wide. ihslib is pinned to the head
 of its pull request #4, which adds the key exchange current Steam requires for pairing (an
 X25519 key masked with the PIN). The key Steam and the device agree on is per host, so the
-app stores one for each paired computer. `patches/ihslib` holds eleven patches applied
+app stores one for each paired computer. `patches/ihslib` holds fifteen patches applied
 to ihslib at download time: two threading fixes, a thread function signature fix and a
 timestamp overflow fix the TV build needs, three fixes that let a stream get past lost
 packets (on Wi-Fi a single one used to end the session or freeze the video for good), stream
-statistics, forward error correction for video, the quality and bitrate settings, and the
-codecs and picture size the client asks for. Each patch starts with a description of what it
-does.
+statistics, forward error correction for video, the quality and bitrate settings, the codecs
+and picture size the client asks for, lost audio frames reported to the app, the host's MAC
+address, 250 Hz controller polling, and a timeout for a host that went silent. Each patch
+starts with a description of what it does.
 
 Video uses Steam's forward error correction: every video message comes with one or two
 parity packets, and the app rebuilds a message that lost up to that many packets instead of
@@ -126,6 +127,15 @@ back to H.264 otherwise, even with HEVC selected in the settings.
   second and overall), messages rebuilt by error correction and lost anyway, keyframe
   requests, and the round trip to the computer.
 - On the computer list, the red (A) key forgets the selected computer.
+- A computer that is offline but reported its network address while online shows "Wake":
+  selecting it sends a Wake-on-LAN packet. Whether it wakes depends on the computer (its
+  network card has to be set up for it). Steam on the Steam Deck reports the address; Steam
+  on Linux desktops may not.
+- When the computer goes silent for 10 seconds (Wi-Fi out, the computer asleep), the stream
+  ends and the app reconnects by itself, up to twice in a row, if the computer answers again
+  within 15 seconds. A stream the computer ends itself isn't reconnected.
+- Lost audio packets are filled in by the Opus decoder (up to 80 ms per gap), so a short
+  Wi-Fi hiccup is a smoothed-over moment instead of a cut.
 - Keyboards and mice plugged into the TV are passed through. Click the picture to capture
   the mouse.
 - The app reloads its page after each stream, which resets the video player.
@@ -148,7 +158,8 @@ its mode when it starts.
 
 ```
 tsl-cli discover                 list computers that answer a broadcast
-tsl-cli probe <ip>               ask one computer directly
+tsl-cli probe <ip>               ask one computer directly (also shows its MAC address)
+tsl-cli wake <mac>               send a Wake-on-LAN packet
 tsl-cli pair <ip>                pair, typing the printed PIN into Steam on that computer
 tsl-cli stream <ip> --seconds 20 --out /tmp/stream
                                  stream, then write video.h264 (or .hevc) and audio.wav
@@ -158,8 +169,8 @@ tsl-cli stream <ip> --seconds 20 --out /tmp/stream
 `--hevc`, `--no-audio`, `--max 1920x1080`, `--quality auto|fast|balanced|beautiful`,
 `--bitrate KBPS` (-1 lets Steam decide), `--no-fec`, and `--input-test`, which plugs in a
 virtual gamepad, presses A and D-pad down, and sends Escape, so the effect shows in the
-recording. At the end it prints the frame count and a network summary: packets lost,
-messages rebuilt, keyframe requests and the round trip.
+recording. At the end it prints the frame count, audio frames lost and filled in, and a
+network summary: packets lost, messages rebuilt, keyframe requests and the round trip.
 The device identity and the paired computers, with their keys, are kept in
 `~/.config/tizen-steam-link`. The CLI has its own identity, so it is paired separately
 from the TV.
@@ -167,8 +178,10 @@ from the TV.
 To see how a stream copes with Wi-Fi-like packet loss on a wired network, set
 `TSL_TEST_RECV_LOSS` to a percentage, for example `TSL_TEST_RECV_LOSS=0.5 tsl-cli stream ...`.
 The desktop build then drops that share of incoming datagrams of 1000 bytes or more and logs
-each drop, each retransmission, and each dropped packet that arrives again. The TV build
-doesn't have this.
+each drop, each retransmission, and each dropped packet that arrives again.
+`TSL_TEST_RECV_LOSS_MIN_BYTES=0` includes the small packets (audio, control), and
+`TSL_TEST_RECV_BLACKOUT_AFTER=<seconds>` drops everything from then on, like a computer that
+went to sleep. The TV build doesn't have these.
 
 ## Trying the interface in a browser
 

@@ -89,6 +89,10 @@
         key: function () {
             record('key', arguments);
         },
+        wake: function () {
+            record('wake', arguments);
+            return true;
+        },
         mouseMove: function () {},
         mouseButton: function () {
             record('mouseButton', arguments);

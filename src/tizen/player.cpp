@@ -28,6 +28,8 @@ constexpr auto kAudioStarvation = 100ms;
 const Player::Seconds kAudioMaxBehind(0.04);
 const Player::Seconds kAudioMaxAhead(0.04);
 constexpr auto kOpenTimeout = 5000ms;
+// Most lost audio frames in a row to conceal: 80 ms of 10 ms frames.
+constexpr uint32_t kMaxConcealedFrames = 8;
 
 const char *VideoMime(const IHS_StreamVideoConfig &config) {
     switch (config.codec) {
@@ -331,6 +333,27 @@ int Player::AudioPacket(const uint8_t *data, size_t len) {
     if (opus_ == nullptr) return 0;
     int samples = opus_decode(opus_, data, static_cast<opus_int32>(len), pcm_.data(), kMaxOpusSamples, 0);
     if (samples <= 0) return 0;
+    lastSamples_ = samples;
+    AppendDecoded(samples);
+    lastAudio_ = std::chrono::steady_clock::now();
+    return 0;
+}
+
+void Player::AudioLost(uint32_t frames) {
+    if (!audioOpen_) return;
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    if (opus_ == nullptr) return;
+    // Opus conceals a lost frame when decoding without data. Past a few frames that sounds worse
+    // than a gap, so longer losses stay gaps (AppendPcm moves the timestamps on).
+    for (uint32_t i = 0; i < frames && i < kMaxConcealedFrames; i++) {
+        int samples = opus_decode(opus_, nullptr, 0, pcm_.data(), lastSamples_, 0);
+        if (samples <= 0) break;
+        AppendDecoded(samples);
+        audioConcealed_++;
+    }
+}
+
+void Player::AppendDecoded(int samples) {
     if (channels_ == 1) {
         // The track is stereo; duplicate mono into both channels, back to front in place.
         for (int i = samples - 1; i >= 0; i--) {
@@ -339,8 +362,6 @@ int Player::AudioPacket(const uint8_t *data, size_t len) {
         }
     }
     AppendPcm(pcm_.data(), samples);
-    lastAudio_ = std::chrono::steady_clock::now();
-    return 0;
 }
 
 void Player::FillSilenceIfStarved() {
@@ -372,6 +393,7 @@ Player::Counters Player::counters() const {
     c.audioFailed = audioFailed_.load();
     c.silenceFilled = silence_.load();
     c.audioDropped = audioDropped_.load();
+    c.audioConcealed = audioConcealed_.load();
     c.videoSessionChanges = videoSessionChanges_.load();
     c.videoTrackCloses = videoTrackCloses_.load();
     c.lastCloseReason = lastCloseReason_.load();

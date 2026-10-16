@@ -1,0 +1,63 @@
+Tell the app about lost audio frames.
+
+Audio packets are unreliable and not resent, so a lost one used to vanish without a trace:
+the next frame followed straight on, and the app's audio timeline shifted. The data frame ids
+of the audio channel count up by one per 10 ms frame (checked against Steam), so a gap in
+them is the number of frames lost. IHS_StreamAudioCallbacks gains an optional lost callback,
+called with that number before the frame that follows the gap, so a decoder can fill it in
+(Opus conceals a frame when decoding without data). A frame older than one already passed
+on is dropped.
+
+diff --git a/include/ihslib/audio.h b/include/ihslib/audio.h
+index 44e382b..d4d4fc9 100644
+--- a/include/ihslib/audio.h
++++ b/include/ihslib/audio.h
+@@ -55,6 +55,13 @@ typedef struct IHS_StreamAudioCallbacks {
+     int (*submit)(IHS_Session *session, IHS_Buffer *data, void *context);
+ 
+     void (*stop)(IHS_Session *session, void *context);
++
++    /**
++     * Optional: frames that never arrived, in the place where they belong (called before the
++     * frame that follows them). Audio isn't resent, so a decoder can conceal them, as Opus does
++     * when decoding without data.
++     */
++    void (*lost)(IHS_Session *session, uint32_t frames, void *context);
+ } IHS_StreamAudioCallbacks;
+ 
+ /**
+diff --git a/src/session/channels/ch_data_audio.c b/src/session/channels/ch_data_audio.c
+index 892898d..eaed464 100644
+--- a/src/session/channels/ch_data_audio.c
++++ b/src/session/channels/ch_data_audio.c
+@@ -34,6 +34,9 @@
+ typedef struct ChannelAudio {
+     IHS_SessionChannelData base;
+     IHS_StreamAudioConfig config;
++    /* Data frame ids count up by one per audio frame; a gap is frames lost. */
++    bool frameIdStarted;
++    uint16_t nextFrameId;
+ } ChannelAudio;
+ 
+ static void ChannelAudioInit(IHS_SessionChannel *channel, const void *config);
+@@ -96,7 +99,20 @@ static bool DataStart(struct IHS_SessionChannel *channel) {
+ 
+ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header, IHS_Buffer *body) {
+     IHS_Session *session = channel->session;
++    ChannelAudio *audioCh = (ChannelAudio *) channel;
+     const IHS_StreamAudioCallbacks *callbacks = session->callbacks.audio;
++    if (header != NULL) {
++        int16_t gap = audioCh->frameIdStarted ? (int16_t) (header->id - audioCh->nextFrameId) : 0;
++        if (gap < 0) {
++            // Older than a frame already passed on, or already reported lost.
++            return;
++        }
++        if (gap > 0 && callbacks && callbacks->lost) {
++            callbacks->lost(session, (uint32_t) gap, session->callbackContexts.audio);
++        }
++        audioCh->frameIdStarted = true;
++        audioCh->nextFrameId = (uint16_t) (header->id + 1);
++    }
+     if (!callbacks || !callbacks->submit) return;
+     callbacks->submit(session, body, session->callbackContexts.audio);
+ }

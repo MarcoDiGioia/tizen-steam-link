@@ -1,0 +1,35 @@
+Pass the host's MAC address on with its host info.
+
+CMsgRemoteClientBroadcastStatus carries mac_addresses (field 15), which the discovery callback
+dropped. IHS_HostInfo gains macAddress, the first one as Steam sends it, so an app can wake a
+computer that went to sleep (Wake-on-LAN) once it has seen it online.
+
+diff --git a/include/ihslib/common.h b/include/ihslib/common.h
+index 1184783..ade8ea1 100644
+--- a/include/ihslib/common.h
++++ b/include/ihslib/common.h
+@@ -138,6 +138,8 @@ typedef struct IHS_HostInfo {
+     IHS_SteamOSType ostype;
+     IHS_SteamUniverse universe;
+     bool gamesRunning;
++    /** First MAC address the host reports, as Steam sends it, for Wake-on-LAN; empty if none. */
++    char macAddress[32];
+ } IHS_HostInfo;
+ 
+ typedef enum IHS_LogLevel {
+diff --git a/src/client/discovery.c b/src/client/discovery.c
+index 2e8809f..daad2eb 100644
+--- a/src/client/discovery.c
++++ b/src/client/discovery.c
+@@ -73,6 +73,11 @@ void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *ad
+         info.gamesRunning = status->games_running;
+         strncpy(info.hostname, status->hostname, sizeof(info.hostname) - 1);
+         info.hostname[sizeof(info.hostname) - 1] = '\0';
++        info.macAddress[0] = '\0';
++        if (status->n_mac_addresses > 0 && status->mac_addresses[0] != NULL) {
++            strncpy(info.macAddress, status->mac_addresses[0], sizeof(info.macAddress) - 1);
++            info.macAddress[sizeof(info.macAddress) - 1] = '\0';
++        }
+         if (client->callbacks.discovery && client->callbacks.discovery->discovered) {
+             client->callbacks.discovery->discovered(client, &info, client->callbackContexts.discovery);
+         }

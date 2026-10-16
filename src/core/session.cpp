@@ -33,6 +33,7 @@ Session::Session(const Identity &identity, const HostKey &key, const IHS_Session
             .start = CbAudioStart,
             .submit = CbAudioSubmit,
             .stop = CbAudioStop,
+            .lost = CbAudioLost,
     };
     static const IHS_StreamInputCallbacks inputCallbacks = {
             .setCursor = CbSetCursor,
@@ -96,6 +97,7 @@ SessionStats Session::Stats() const {
     s.fec = net.fec;
     s.fecRecovered = net.fecRecovered;
     s.fecUnrecoverable = net.fecUnrecoverable;
+    s.timedOut = net.timedOut;
     s.framerateNum = fpsNum_.load();
     s.framerateDen = fpsDen_.load();
     return s;
@@ -234,6 +236,10 @@ int Session::CbAudioSubmit(IHS_Session *, IHS_Buffer *data, void *context) {
     self->audioPackets_++;
     self->audioBytes_ += data->size;
     return self->media_->AudioPacket(IHS_BufferPointer(data), data->size);
+}
+
+void Session::CbAudioLost(IHS_Session *, uint32_t frames, void *context) {
+    static_cast<Session *>(context)->media_->AudioLost(frames);
 }
 
 void Session::CbAudioStop(IHS_Session *, void *context) {
