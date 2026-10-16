@@ -28,6 +28,8 @@
     var SETTINGS = [
         {key: 'resolution', label: 'Maximum resolution', values: [0, 1, 2, 3],
             text: function (v) { return RESOLUTIONS[v].label; }},
+        {key: 'framerate', label: 'Frame rate', values: [60, 120],
+            text: function (v) { return v + ' fps'; }},
         {key: 'hevc', label: 'Video codec', values: [false, true],
             text: function (v) { return v ? 'HEVC' : 'H.264'; }},
         {key: 'quality', label: 'Quality', values: [-1, 1, 2, 3],
@@ -42,8 +44,8 @@
             text: function (v) { return v ? 'Shown' : 'Hidden'; }},
     ];
 
-    var DEFAULT_SETTINGS = {resolution: 1, hevc: false, quality: 2, bandwidth: 30000, audio: true, bigPicture: false,
-        stats: false};
+    var DEFAULT_SETTINGS = {resolution: 1, framerate: 60, hevc: false, quality: 2, bandwidth: 30000, audio: true,
+        bigPicture: false, stats: false};
     var ONLINE_MS = 9000;
     var PAIR_TIMEOUT_MS = 120000;
     var CONNECT_TIMEOUT_MS = 30000;
@@ -332,7 +334,8 @@
 
     function settingsSummary() {
         var res = RESOLUTIONS[state.settings.resolution] || RESOLUTIONS[1];
-        return 'Up to ' + res.label + '  ·  ' + (state.settings.hevc ? 'HEVC' : 'H.264') + '  ·  ' +
+        return 'Up to ' + res.label + (state.settings.framerate > 60 ? ' at ' + state.settings.framerate + ' fps' : '') +
+            '  ·  ' + (state.settings.hevc ? 'HEVC' : 'H.264') + '  ·  ' +
             QUALITIES[state.settings.quality] + ', ' + bandwidthText(state.settings.bandwidth) + '  ·  audio ' +
             (state.settings.audio ? 'on' : 'off') + '  ·  opens ' +
             (state.settings.bigPicture ? 'Big Picture' : 'the desktop');
@@ -692,7 +695,7 @@
         showStreamStatus('Starting the stream…');
         var ok = mod.startStream(host.ip, String(host.steamId || ''), host.key, res.w, res.h,
             !!state.settings.hevc, !!state.settings.audio, !!state.settings.bigPicture,
-            Number(state.settings.quality), Number(state.settings.bandwidth));
+            Number(state.settings.quality), Number(state.settings.bandwidth), Number(state.settings.framerate));
         if (!ok) streamFailed('Could not contact ' + host.hostname + '.');
     }
 
@@ -817,7 +820,13 @@
             if (down && !e.repeat && !s.backTimer) {
                 s.backTimer = setTimeout(function () {
                     s.backTimer = null;
-                    endStream();
+                    // While connecting there is nothing to come back to: holding Back cancels.
+                    if (s.connected) {
+                        s.backHeld = true;
+                        openStreamMenu();
+                    } else {
+                        endStream();
+                    }
                 }, BACK_HOLD_MS);
             } else if (!down && s.backTimer) {
                 // A short press is Escape on the host.
@@ -837,6 +846,60 @@
         if (!s.connected) return;
         var code = e.code || REMOTE_CODES[e.keyCode];
         if (code && !(down && e.repeat)) mod.key(code, down);
+    }
+
+    // The menu over a stream: hold Back, or the pad's exit combo. While it is open the remote
+    // and the pads drive it, and the module stops passing pads on to the computer.
+    function openStreamMenu() {
+        var s = state.stream;
+        if (!s || state.streamMenu) return;
+        state.streamMenu = true;
+        if (mod) mod.setPadInput(false);
+        var dlg = $('#dialog-stream-menu');
+        field(dlg, 'hostname').textContent = s.hostname;
+        var stats = $('[data-action="stats"]', dlg);
+        var label = function () {
+            stats.textContent = $('#stream-stats').hidden ? 'Show statistics' : 'Hide statistics';
+        };
+        label();
+        openDialog(dlg, $('[data-action="resume"]', dlg), function (action) {
+            if (action === 'stats') {
+                toggleStats();
+                label();
+            } else if (action === 'text') {
+                openTextDialog();
+            } else if (action === 'leave') {
+                closeStreamDialogs();
+                endStream();
+            } else {
+                closeStreamDialogs();
+            }
+        });
+    }
+
+    function openTextDialog() {
+        var dlg = $('#dialog-text');
+        var input = $('#send-text');
+        input.value = '';
+        openDialog(dlg, input, function (action) {
+            var text = input.value;
+            if (action === 'send' && text && mod) {
+                mod.sendText(text);
+                note('sent ' + text.length + ' characters of text');
+            }
+            closeStreamDialogs();
+        });
+    }
+
+    function closeStreamDialogs() {
+        $all('.dialog').forEach(function (d) {
+            d.hidden = true;
+        });
+        dialogHandler = null;
+        state.scope = null;
+        setFocus(null);
+        state.streamMenu = false;
+        if (mod) mod.setPadInput(true);
     }
 
     function wireStreamInput() {
@@ -875,9 +938,15 @@
             toggleLog();
             return;
         }
-        if (state.stream) {
+        if (state.stream && !state.streamMenu) {
             e.preventDefault();
             streamKey(e, down);
+            return;
+        }
+        // The Back press that opened the menu is still down; its repeats mustn't close it.
+        if (state.streamMenu && e.keyCode === KEY.BACK && state.stream.backHeld) {
+            if (!down) state.stream.backHeld = false;
+            if (e.preventDefault) e.preventDefault();
             return;
         }
         if (!down) return;
@@ -941,24 +1010,42 @@
         }
     }
 
-    // Gamepad navigation outside the stream (during a stream the WASM module owns pads).
+    // Gamepad navigation outside the stream and in its menu (otherwise the module owns pads).
 
     var padPrev = {};
     var padRepeat = {};
+    var padSeen = {};
+
+    // A short buzz when a controller first shows up, so it's clear the TV has it.
+    function hello(pad) {
+        if (pad.vibrationActuator && pad.vibrationActuator.playEffect) {
+            pad.vibrationActuator.playEffect('dual-rumble', {duration: 150, strongMagnitude: 0.3, weakMagnitude: 0.6})
+                .catch(function () {});
+        }
+        note('controller ' + (pad.index + 1) + ': ' + pad.id);
+    }
 
     function pollPads(ts) {
         var anyPad = false;
         if (navigator.getGamepads) {
             var all = navigator.getGamepads();
             for (var j = 0; j < all.length; j++) {
-                if (all[j] && all[j].connected) anyPad = true;
+                if (all[j] && all[j].connected) {
+                    anyPad = true;
+                    if (!padSeen[all[j].index]) {
+                        padSeen[all[j].index] = true;
+                        hello(all[j]);
+                    }
+                } else if (all[j]) {
+                    padSeen[all[j].index] = false;
+                }
             }
         }
         if (anyPad !== state.padConnected) {
             state.padConnected = anyPad;
             $('#pad-indicator').hidden = !anyPad;
         }
-        if (!state.stream && navigator.getGamepads) {
+        if ((!state.stream || state.streamMenu) && navigator.getGamepads) {
             var pads = navigator.getGamepads();
             for (var i = 0; i < pads.length; i++) {
                 var p = pads[i];
@@ -1105,7 +1192,12 @@
             if (state.stream) reloadPage();
         });
         tsl.on('exitCombo', function () {
-            if (state.stream) endStream();
+            if (!state.stream) return;
+            if (state.stream.connected) {
+                openStreamMenu();
+            } else {
+                endStream();
+            }
         });
         tsl.on('gamepadConnected', function (d) {
             if (state.stream) toast('Controller ' + (d.slot + 1) + ' connected');
@@ -1155,6 +1247,22 @@
     // Discovery also goes to the subnet's broadcast address: a Linux Steam host has been seen
     // ignoring 255.255.255.255 while answering that. The TV's own address comes from
     // systeminfo; the network is taken to be a /24.
+    // App version and TV model, for reports; empty in a browser.
+    function deviceLabel() {
+        var parts = [];
+        try {
+            parts.push('v' + tizen.application.getCurrentApplication().appInfo.version);
+        } catch (e) { /* not on a TV */ }
+        try {
+            parts.push(tizen.systeminfo.getCapability('http://tizen.org/system/model_name'));
+        } catch (e) { /* not on a TV */ }
+        try {
+            parts.push('Tizen ' + tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'));
+        } catch (e) { /* not on a TV */ }
+        if (parts.length) note(parts.join(', '));
+        return parts.length ? ' · ' + parts.join(' · ') : '';
+    }
+
     function findLocalBroadcasts() {
         ['ETHERNET_NETWORK', 'WIFI_NETWORK'].forEach(function (prop) {
             try {
@@ -1215,7 +1323,7 @@
         requestAnimationFrame(pollPads);
         updateClock();
         setInterval(updateClock, 10000);
-        $('#footer-left').textContent = 'Unofficial client · not affiliated with Valve';
+        $('#footer-left').textContent = 'Unofficial client · not affiliated with Valve' + deviceLabel();
 
         var message = null, reconnect = null;
         try {

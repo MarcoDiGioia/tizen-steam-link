@@ -44,6 +44,8 @@ struct SessionOptions {
     // maximum: that request alone doesn't lift the stream above 1080p.
     int maxWidth = 0;
     int maxHeight = 0;
+    // Frames per second to ask for; 0 = 59.94.
+    int maxFramerate = 0;
 };
 
 struct SessionStats {

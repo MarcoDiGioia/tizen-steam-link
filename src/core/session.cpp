@@ -166,9 +166,10 @@ void Session::CbConfiguring(IHS_Session *, IHS_SessionConfig *config, void *cont
     config->bitrateKbps = self->options_.bitrateKbps;
     config->maxWidth = self->options_.maxWidth;
     config->maxHeight = self->options_.maxHeight;
-    Log(IHS_LogLevelInfo, "Session", "Negotiating: audio=%d hevc=%d fec=%d quality=%d bitrate=%d max=%dx%d",
+    config->maxFramerate = self->options_.maxFramerate;
+    Log(IHS_LogLevelInfo, "Session", "Negotiating: audio=%d hevc=%d fec=%d quality=%d bitrate=%d max=%dx%d@%d",
         config->enableAudio, config->enableHevc, config->enableFec, config->quality, config->bitrateKbps,
-        config->maxWidth, config->maxHeight);
+        config->maxWidth, config->maxHeight, config->maxFramerate);
 }
 
 void Session::CbConnected(IHS_Session *session, void *context) {

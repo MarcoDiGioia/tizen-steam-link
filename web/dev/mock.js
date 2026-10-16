@@ -89,6 +89,12 @@
         key: function () {
             record('key', arguments);
         },
+        sendText: function () {
+            record('sendText', arguments);
+        },
+        setPadInput: function () {
+            record('setPadInput', arguments);
+        },
         wake: function () {
             record('wake', arguments);
             return true;

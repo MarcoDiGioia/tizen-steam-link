@@ -376,7 +376,7 @@ void Usage() {
                  "  wake <mac> [--port N]            send a Wake-on-LAN packet (probe shows the MAC)\n"
                  "  pair <ip> [--pin NNNN] [--wait S] pair this device; type the PIN into Steam on the host\n"
                  "  stream <ip> [--seconds N] [--out DIR] [--hevc] [--no-audio] [--max WxH] [--input-test]\n"
-                 "              [--quality auto|fast|balanced|beautiful] [--bitrate KBPS] [--no-fec]\n"
+                 "              [--quality auto|fast|balanced|beautiful] [--bitrate KBPS] [--fps N] [--no-fec]\n"
                  "                                   stream and write video.h264/.hevc and audio.wav;\n"
                  "                                   --input-test plugs in a virtual pad and presses buttons\n"
                  "\n"
@@ -572,6 +572,7 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
     options.bitrateKbps = std::atoi(args.Get("--bitrate", "0").c_str());
     options.maxWidth = request.maxWidth;
     options.maxHeight = request.maxHeight;
+    options.maxFramerate = std::atoi(args.Get("--fps", "0").c_str());
     FileSink sink(out, options.hevc);
     tsl::Session session(identity, pairing.key, info, options, &sink, &sink);
     if (!session.Connect()) {

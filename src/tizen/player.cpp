@@ -31,16 +31,25 @@ constexpr auto kOpenTimeout = 5000ms;
 // Most lost audio frames in a row to conceal: 80 ms of 10 ms frames.
 constexpr uint32_t kMaxConcealedFrames = 8;
 
-const char *VideoMime(const IHS_StreamVideoConfig &config) {
+// The level follows the picture size times the frame rate.
+const char *VideoMime(const IHS_StreamVideoConfig &config, uint32_t fps) {
+    uint64_t samples = static_cast<uint64_t>(config.width) * config.height * fps;
     switch (config.codec) {
-        case IHS_StreamVideoCodecH264:
-            // Level 4.2 tops out at 1080p60; Steam's 4K H.264 is level 5.1.
-            if (config.width * config.height > 1920 * 1088) {
-                return "video/mp4; codecs=\"avc1.640034\"";  // High, level 5.2 (4K60)
+        case IHS_StreamVideoCodecH264: {
+            // Level 4.2 allows 522240 macroblocks a second (1080p at 64 fps); 5.2 allows 2073600
+            // (4K60, 1080p120). Steam's 4K H.264 is level 5.1.
+            uint64_t macroblocks = ((config.width + 15) / 16) * ((config.height + 15) / 16) * static_cast<uint64_t>(fps);
+            if (macroblocks > 522240) {
+                return "video/mp4; codecs=\"avc1.640034\"";  // High, level 5.2
             }
             return "video/mp4; codecs=\"avc1.64002A\"";  // High, level 4.2
+        }
         case IHS_StreamVideoCodecHEVC:
-            return "video/mp4; codecs=\"hev1.1.6.L153.B0\"";  // Main, level 5.1 (4K60)
+            // Level 5.1 allows 534773760 luma samples a second (4K60, 1080p120); 5.2 twice that.
+            if (samples > 534773760ull) {
+                return "video/mp4; codecs=\"hev1.1.6.L156.B0\"";  // Main, level 5.2 (4K120)
+            }
+            return "video/mp4; codecs=\"hev1.1.6.L153.B0\"";  // Main, level 5.1
         default:
             return nullptr;
     }
@@ -132,7 +141,7 @@ bool Player::WaitFor(std::chrono::milliseconds timeout, const std::function<bool
 Player::Seconds Player::Now() const { return std::chrono::steady_clock::now() - start_; }
 
 bool Player::OpenSource(const IHS_StreamVideoConfig &config) {
-    const char *mime = VideoMime(config);
+    const char *mime = VideoMime(config, fps_);
     if (mime == nullptr) {
         Log(IHS_LogLevelError, "Player", "Unsupported video codec %d", config.codec);
         return false;

@@ -54,6 +54,8 @@ public:
 
     void SetHevcSupported(bool supported) { hevc_ = supported; }
     void SetAudioEnabled(bool enabled) { audioEnabled_ = enabled; }
+    // Before the first VideoStart: the video track takes it when it opens.
+    void SetFramerate(uint32_t fps) { fps_ = fps > 0 ? fps : 60; }
 
     bool SupportsHevc() override { return hevc_; }
     int VideoStart(const IHS_StreamVideoConfig &config) override;

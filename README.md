@@ -34,14 +34,14 @@ Dependencies (ihslib, mbedTLS 3.6, protobuf-c, Opus) are downloaded by CMake at 
 versions and checked by hash. Nothing is installed system-wide. ihslib is pinned to the head
 of its pull request #4, which adds the key exchange current Steam requires for pairing (an
 X25519 key masked with the PIN). The key Steam and the device agree on is per host, so the
-app stores one for each paired computer. `patches/ihslib` holds fifteen patches applied
+app stores one for each paired computer. `patches/ihslib` holds sixteen patches applied
 to ihslib at download time: two threading fixes, a thread function signature fix and a
 timestamp overflow fix the TV build needs, three fixes that let a stream get past lost
 packets (on Wi-Fi a single one used to end the session or freeze the video for good), stream
 statistics, forward error correction for video, the quality and bitrate settings, the codecs
 and picture size the client asks for, lost audio frames reported to the app, the host's MAC
-address, 250 Hz controller polling, and a timeout for a host that went silent. Each patch
-starts with a description of what it does.
+address, 250 Hz controller polling, a timeout for a host that went silent, and frame rates
+above 60. Each patch starts with a description of what it does.
 
 Video uses Steam's forward error correction: every video message comes with one or two
 parity packets, and the app rebuilds a message that lost up to that many packets instead of
@@ -121,11 +121,16 @@ back to H.264 otherwise, even with HEVC selected in the settings.
 - Selecting a computer that isn't paired shows a four-digit PIN. Steam on that computer opens
   a dialog asking for it.
 - Selecting a paired computer starts the stream.
-- During a stream, holding Back leaves it, and so does pressing LB + RB + View + Menu on a
-  controller. A short press of Back sends Escape to the computer. The red (A) key shows or
-  hides the stream statistics: resolution, frame rate and bitrate, packet loss (over the last
-  second and overall), messages rebuilt by error correction and lost anyway, keyframe
-  requests, and the round trip to the computer.
+- During a stream, holding Back (or LB + RB + View + Menu on a controller) opens the stream
+  menu: Resume, Type text, show or hide the statistics, Leave the stream. While it is open
+  the remote and the controllers drive the menu, not the computer. A short press of Back
+  sends Escape to the computer. The red (A) key shows or hides the stream statistics:
+  resolution, frame rate and bitrate, packet loss (over the last second and overall),
+  messages rebuilt by error correction and lost anyway, keyframe requests, the round trip to
+  the computer, and what the TV's player did with the frames.
+- Type text opens the TV's keyboard and sends what you type to the computer, as if typed on a
+  keyboard there. Steam's own keyboard in Big Picture works too.
+- A controller buzzes briefly when the TV first sees it.
 - On the computer list, the red (A) key forgets the selected computer.
 - A computer that is offline but reported its network address while online shows "Wake":
   selecting it sends a Wake-on-LAN packet. Whether it wakes depends on the computer (its
@@ -140,7 +145,8 @@ back to H.264 otherwise, even with HEVC selected in the settings.
   the mouse.
 - The app reloads its page after each stream, which resets the video player.
 
-Settings cover the maximum resolution (720p to 4K), H.264 or HEVC, Steam's quality
+Settings cover the maximum resolution (720p to 4K), the frame rate (60 or 120 fps; 120 needs a
+TV with a 120 Hz panel and a computer that can keep up), H.264 or HEVC, Steam's quality
 preference (Automatic, Fast, Balanced, Beautiful), a bandwidth limit (Automatic, or 5 to
 100 Mbit/s; 30 by default), audio, and whether the stream opens on the desktop or in Big
 Picture. On a busy Wi-Fi network a lower bandwidth limit means fewer packets to lose.
@@ -167,7 +173,7 @@ tsl-cli stream <ip> --seconds 20 --out /tmp/stream
 
 `pair` also takes `--pin NNNN` and `--wait SECONDS` (120 by default). `stream` also takes
 `--hevc`, `--no-audio`, `--max 1920x1080`, `--quality auto|fast|balanced|beautiful`,
-`--bitrate KBPS` (-1 lets Steam decide), `--no-fec`, and `--input-test`, which plugs in a
+`--bitrate KBPS` (-1 lets Steam decide), `--fps N`, `--no-fec`, and `--input-test`, which plugs in a
 virtual gamepad, presses A and D-pad down, and sends Escape, so the effect shows in the
 recording. At the end it prints the frame count, audio frames lost and filled in, and a
 network summary: packets lost, messages rebuilt, keyframe requests and the round trip.

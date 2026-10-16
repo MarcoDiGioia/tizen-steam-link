@@ -102,6 +102,32 @@
     </div>
 </div>
 
+<div id="dialog-stream-menu" class="dialog" hidden>
+    <div class="panel">
+        <p class="eyebrow">Streaming</p>
+        <h2 data-field="hostname"></h2>
+        <div class="buttons column">
+            <button class="focusable primary" data-action="resume">Resume</button>
+            <button class="focusable" data-action="text">Type text</button>
+            <button class="focusable" data-action="stats">Show statistics</button>
+            <button class="focusable danger" data-action="leave">Leave the stream</button>
+        </div>
+    </div>
+</div>
+
+<div id="dialog-text" class="dialog" hidden>
+    <div class="panel">
+        <p class="eyebrow">Type text</p>
+        <h2>Send text to the computer</h2>
+        <p>It goes where the cursor is on the computer, as if typed on a keyboard.</p>
+        <input id="send-text" class="focusable" type="text" autocomplete="off" spellcheck="false">
+        <div class="buttons">
+            <button class="focusable primary" data-action="send">Send</button>
+            <button class="focusable" data-action="cancel">Cancel</button>
+        </div>
+    </div>
+</div>
+
 <div id="stream" class="screen stream" hidden>
     <!-- Not muted: the stream's audio plays through this element. -->
     <video id="tsl-video" autoplay tabindex="-1"></video>
@@ -116,7 +142,7 @@
     </div>
     <div id="stream-hint" class="overlay notice" hidden>
         <svg viewBox="0 0 64 40"><use href="#i-pad"/></svg>
-        <span>To leave, hold <kbd class="key">Back</kbd> or press
+        <span>For the menu, hold <kbd class="key">Back</kbd> or press
             <kbd class="glyph">LB</kbd><kbd class="glyph">RB</kbd><kbd class="glyph">View</kbd><kbd class="glyph">Menu</kbd></span>
     </div>
     <pre id="stream-stats" class="overlay stats" hidden></pre>

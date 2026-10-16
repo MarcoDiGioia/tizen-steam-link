@@ -475,6 +475,16 @@ svg {
     margin-left: 20px;
 }
 
+.buttons.column {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.buttons.column > * + * {
+    margin-left: 0;
+    margin-top: 16px;
+}
+
 button.focusable {
     min-width: 220px;
     padding: 18px 40px;
@@ -536,7 +546,7 @@ input.focusable.focused {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    min-height: 88px;
+    min-height: 76px;
     padding: 0 28px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 6px;

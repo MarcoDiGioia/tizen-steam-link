@@ -241,6 +241,14 @@ public:
         if (auto session = CurrentSession()) session->SendMouseMove(dx, dy);
     }
 
+    void SendText(const std::string &text) {
+        if (auto session = CurrentSession()) session->SendText(text.c_str());
+    }
+
+    // Off while the UI's stream menu is open: the pads drive the menu, the computer sees them
+    // released.
+    void SetPadInput(bool enabled) { padInput_ = enabled; }
+
     void MouseButton(int domButton, bool down) {
         IHS_StreamInputMouseButton button;
         switch (domButton) {
@@ -382,6 +390,7 @@ public:
             sessionInfo.steamId = params.steamId;
             player_.SetHevcSupported(params.options.hevc);
             player_.SetAudioEnabled(params.options.audio);
+            player_.SetFramerate(static_cast<uint32_t>(params.options.maxFramerate));
             auto session =
                     std::make_shared<Session>(identity_, params.key, sessionInfo, params.options, &player_, this);
             session->SetRumbleCallback(OnRumble, nullptr);
@@ -466,6 +475,9 @@ private:
                                    (1u << TSL_PAD_BACK) | (1u << TSL_PAD_START);
         bool exitSent = false;
         bool padConnected[TSL_GAMEPAD_SLOTS] = {};
+        // After the menu, a pad stays released for the computer until every button and trigger
+        // is let go: the press that closed the menu isn't the computer's.
+        bool padHeld[TSL_GAMEPAD_SLOTS] = {};
         const Session *lastSession = nullptr;
         while (polling_) {
             std::shared_ptr<Session> session = streaming_ ? CurrentSession() : nullptr;
@@ -506,6 +518,21 @@ private:
                 TSL_GamepadState state;
                 TSL_GamepadStateFromStandard(pad.axis, static_cast<size_t>(pad.numAxes), pad.analogButton, pressed,
                                              static_cast<size_t>(buttons), &state);
+                if (!padInput_) {
+                    padHeld[i] = true;
+                    session->UpdateGamepad(i, TSL_GamepadState{});
+                    continue;
+                }
+                if (padHeld[i]) {
+                    const int16_t triggerUp = 4096;
+                    if (state.buttons != 0 || state.axes[TSL_PAD_AXIS_TRIGGER_LEFT] > triggerUp ||
+                        state.axes[TSL_PAD_AXIS_TRIGGER_RIGHT] > triggerUp) {
+                        session->UpdateGamepad(i, TSL_GamepadState{});
+                        continue;
+                    }
+                    padHeld[i] = false;
+                    exitSent = false;
+                }
                 session->UpdateGamepad(i, state);
                 if ((state.buttons & exitCombo) == exitCombo && !exitSent) {
                     exitSent = true;
@@ -536,6 +563,7 @@ private:
 
     std::atomic<bool> polling_{false};
     std::atomic<bool> streaming_{false};
+    std::atomic<bool> padInput_{true};
     std::thread gamepadThread_;
 };
 
@@ -558,9 +586,9 @@ bool Pair(const std::string &ip, const std::string &pin) { return g_app->Pair(ip
 void CancelPair() { g_app->CancelPair(); }
 
 // quality: Steam's preference (-1 automatic, 1 fast, 2 balanced, 3 beautiful). bitrateKbps: -1 lets
-// Steam decide.
+// Steam decide. fps: 60 or 120.
 bool StartStream(const std::string &ip, const std::string &steamId, const std::string &keyHex, int maxWidth,
-                 int maxHeight, bool hevc, bool audio, bool bigPicture, int quality, int bitrateKbps) {
+                 int maxHeight, bool hevc, bool audio, bool bigPicture, int quality, int bitrateKbps, int fps) {
     StreamParams params;
     params.ip = ip;
     params.steamId = std::strtoull(steamId.c_str(), nullptr, 10);
@@ -574,11 +602,14 @@ bool StartStream(const std::string &ip, const std::string &steamId, const std::s
     params.options.bitrateKbps = bitrateKbps;
     params.options.maxWidth = maxWidth;
     params.options.maxHeight = maxHeight;
+    params.options.maxFramerate = fps > 60 ? fps : 0;
     return g_app->StartStream(params);
 }
 
 void StopStream() { g_app->StopStream(); }
 void Key(const std::string &code, bool down) { g_app->Key(code, down); }
+void SendText(const std::string &text) { g_app->SendText(text); }
+void SetPadInput(bool enabled) { g_app->SetPadInput(enabled); }
 void MouseMove(int dx, int dy) { g_app->MouseMove(dx, dy); }
 void MouseButton(int button, bool down) { g_app->MouseButton(button, down); }
 void MouseWheel(int deltaY) { g_app->MouseWheel(deltaY); }
@@ -627,6 +658,8 @@ EMSCRIPTEN_BINDINGS(tsl) {
     emscripten::function("startStream", &tsl::StartStream);
     emscripten::function("stopStream", &tsl::StopStream);
     emscripten::function("key", &tsl::Key);
+    emscripten::function("sendText", &tsl::SendText);
+    emscripten::function("setPadInput", &tsl::SetPadInput);
     emscripten::function("mouseMove", &tsl::MouseMove);
     emscripten::function("mouseButton", &tsl::MouseButton);
     emscripten::function("mouseWheel", &tsl::MouseWheel);

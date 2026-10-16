@@ -1,0 +1,47 @@
+Let the app ask for more than 59.94 frames per second.
+
+The negotiation described the display as 59.94 Hz and asked for at most 59.94 fps
+(CStreamingClientConfig fields 4 and 5, desired_framerate_numerator/denominator in current
+Steam). IHS_SessionConfig gains maxFramerate; 0 keeps 59.94, 120 asks for 120 (in 1/100 fps,
+as before), for TVs with a 120 Hz panel.
+
+diff --git a/include/ihslib/session.h b/include/ihslib/session.h
+index b505b41..4dd108a 100644
+--- a/include/ihslib/session.h
++++ b/include/ihslib/session.h
+@@ -58,6 +58,8 @@ typedef struct IHS_SessionConfig {
+      */
+     int maxWidth;
+     int maxHeight;
++    /** Frames per second the client can show; 0 keeps 59.94. */
++    int maxFramerate;
+ } IHS_SessionConfig;
+ 
+ typedef struct IHS_StreamSessionCallbacks {
+diff --git a/src/session/channels/ch_control_negotiation.c b/src/session/channels/ch_control_negotiation.c
+index b17d818..5fbca86 100644
+--- a/src/session/channels/ch_control_negotiation.c
++++ b/src/session/channels/ch_control_negotiation.c
+@@ -123,10 +123,12 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
+     config.has_selected_video_codec = videoCodec != k_EStreamVideoCodecNone;
+     config.selected_video_codec = videoCodec;
+ 
++    // 59.94 unless the app asks for more, in 1/100 fps.
++    uint32_t framerateNum = ihsConf.maxFramerate > 0 ? (uint32_t) ihsConf.maxFramerate * 100 : 5994;
+     CStreamVideoMode availableVideoMode = CSTREAM_VIDEO_MODE__INIT;
+     availableVideoMode.width = 1920;
+     availableVideoMode.height = 1080;
+-    PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_numerator, 5994);
++    PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_numerator, framerateNum);
+     PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_denominator, 100);
+ 
+     CStreamVideoMode *availableVideoModes[] = {&availableVideoMode};
+@@ -155,7 +157,7 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
+         PROTOBUF_C_SET_VALUE(clientConfig, enable_microphone_streaming, true);
+     }
+     PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
+-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_numerator, 5994);
++    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_numerator, framerateNum);
+     PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_denominator, 100);
+     // Field 6 is desired_bitrate_kbps in current Steam; ihslib's copy still calls it maximum.
+     int bitrateKbps = ihsConf.bitrateKbps != 0 ? ihsConf.bitrateKbps : 30000;
