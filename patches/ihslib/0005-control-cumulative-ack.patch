@@ -1,0 +1,83 @@
+ACK reliable packets cumulatively.
+
+Steam takes an ACK for packet n as an ACK for every packet up to n. The control channel
+acknowledged each reliable packet by its own id, so after a lost packet the ACK for the next
+one told Steam the lost one had arrived, and Steam never sent it again. The window then held
+every later control message behind the gap until it overflowed, and the session ended with
+"Frames window overflow". On Wi-Fi a single lost datagram was enough.
+
+The control channel now acknowledges the newest packet up to which none is missing
+(IHS_SessionPacketsWindowContiguousId), so Steam resends the missing one. Checked against
+Steam with a dropped fragment of a 46-packet control message: before, it was never resent;
+now it comes back as a retransmission within a few packets and the stream goes on.
+
+diff -ruN a/src/session/channels/ch_control.c b/src/session/channels/ch_control.c
+--- a/src/session/channels/ch_control.c	2026-10-16 12:51:58.943821408 -0500
++++ b/src/session/channels/ch_control.c	2026-10-16 12:51:58.958861512 -0500
+@@ -156,13 +156,19 @@
+     IHS_SessionPacketsWindow *window = control->framePacketWindow;
+     switch (packet->header.type) {
+         case IHS_SessionPacketTypeReliable:
+-        case IHS_SessionPacketTypeReliableFrag:
++        case IHS_SessionPacketTypeReliableFrag: {
++            uint16_t ackId = packet->header.packetId;
+             if (!IHS_SessionPacketsWindowAdd(window, packet)) {
+                 IHS_SessionLog(channel->session, IHS_LogLevelError, "Control", "Frames window overflow");
+                 IHS_SessionDisconnect(channel->session);
+             }
+-            IHS_SessionChannelPacketAck(channel, packet->header.packetId, true);
++            // Steam takes an ACK as covering every earlier packet. ACKing each packet by its own
++            // id told it that a lost one had arrived, so it was never sent again and the window
++            // waited for it until it overflowed. ACK the last packet up to which none is missing.
++            IHS_SessionPacketsWindowContiguousId(window, &ackId);
++            IHS_SessionChannelPacketAck(channel, ackId, true);
+             break;
++        }
+         case IHS_SessionPacketTypeACK:
+         case IHS_SessionPacketTypeNACK:
+             // Stop retransmit of the packet
+diff -ruN a/src/session/window.c b/src/session/window.c
+--- a/src/session/window.c	2026-10-16 12:51:58.941443038 -0500
++++ b/src/session/window.c	2026-10-16 12:51:58.958765503 -0500
+@@ -191,6 +191,23 @@
+     return discarded;
+ }
+ 
++bool IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window, uint16_t *id) {
++    if (window->tail.pos < 0) {
++        return false;
++    }
++    /* Everything before head has been polled; the run of used slots from head on decides. */
++    uint16_t size = IHS_SessionPacketsWindowSize(window);
++    uint16_t headId = (uint16_t) (window->tail.id - size + 1);
++    for (uint16_t i = 0; i < size; i++) {
++        if (!FrameItemIsUsed(&window->data[(window->head.pos + i) % window->capacity])) {
++            *id = (uint16_t) (headId + i - 1);
++            return true;
++        }
++    }
++    *id = window->tail.id;
++    return true;
++}
++
+ void IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *frame) {
+     IHS_SessionFrameClear(frame, false);
+ }
+diff -ruN a/src/session/window.h b/src/session/window.h
+--- a/src/session/window.h	2026-10-16 12:51:58.942149075 -0500
++++ b/src/session/window.h	2026-10-16 12:51:58.958723263 -0500
+@@ -52,6 +52,14 @@
+  */
+ uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint32_t diff);
+ 
++/**
++ * Id of the newest packet up to which every packet has been added, whether it has been polled
++ * already or is still in the window. Steam takes an ACK as covering every earlier packet, so
++ * this is the id to acknowledge.
++ * @return false if no packet has been added yet
++ */
++bool IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window, uint16_t *id);
++
+ void IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *frame);
+ 
+ uint16_t IHS_SessionPacketsWindowAvailable(const IHS_SessionPacketsWindow *window);

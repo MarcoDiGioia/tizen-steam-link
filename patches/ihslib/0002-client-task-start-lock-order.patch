@@ -1,0 +1,46 @@
+Start the pairing and streaming tasks outside the client base lock.
+
+The timer thread runs tasks and their cleanups with the timer mutex held, and they take the
+base lock to send. IHS_ClientAuthorizationRequest and IHS_ClientStreamingRequest took the
+timer mutex (IHS_TimerTaskStart) while holding the base lock: the opposite order, which can
+deadlock with the discovery broadcast task.
+
+diff -ruN b/src/client/authorization.c c/src/client/authorization.c
+--- b/src/client/authorization.c	2026-10-16 10:16:05.337844329 -0500
++++ c/src/client/authorization.c	2026-10-16 10:16:05.360564825 -0500
+@@ -65,9 +65,14 @@
+         free(state);
+         return false;
+     }
++    // Start the task without holding the base lock: the timer thread runs tasks (and their
++    // cleanups) with the timer mutex held and those take the base lock, so taking the timer
++    // mutex under the base lock here can deadlock against it. The task only finds its handle
++    // through callbacks that arrive after the host answers.
++    IHS_TimerTask *task = IHS_TimerTaskStart(client->timers, AuthorizationRequestTimer, AuthorizationRequestCleanup, 0,
++                                             state);
+     IHS_BaseLock(&client->base);
+-    client->taskHandles.authorization = IHS_TimerTaskStart(client->timers, AuthorizationRequestTimer,
+-                                                           AuthorizationRequestCleanup, 0, state);
++    client->taskHandles.authorization = task;
+     IHS_BaseUnlock(&client->base);
+     return true;
+ }
+diff -ruN b/src/client/streaming.c c/src/client/streaming.c
+--- b/src/client/streaming.c	2026-10-16 10:16:05.337927836 -0500
++++ c/src/client/streaming.c	2026-10-16 10:16:05.360492135 -0500
+@@ -53,9 +53,13 @@
+     state->requestId = IHS_CryptoRandomUInt32();
+     state->lastMsgType = k_ERemoteClientBroadcastMsgDiscovery;
+     state->lastMsgTime = IHS_TimerNow();
++    // Start the task without holding the base lock: the timer thread runs tasks (and their
++    // cleanups) with the timer mutex held and those take the base lock, so taking the timer
++    // mutex under the base lock here can deadlock against it. The task only finds its handle
++    // through callbacks that arrive after the host answers.
++    IHS_TimerTask *task = IHS_TimerTaskStart(client->timers, StreamingRequestTimer, StreamingRequestCleanup, 0, state);
+     IHS_BaseLock(&client->base);
+-    client->taskHandles.streaming = IHS_TimerTaskStart(client->timers, StreamingRequestTimer, StreamingRequestCleanup,
+-                                                       0, state);
++    client->taskHandles.streaming = task;
+     IHS_BaseUnlock(&client->base);
+     return true;
+ }

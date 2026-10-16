@@ -1,0 +1,797 @@
+/* Look follows Steam's Big Picture mode and the Steam Link app: near-black navy, slate
+ * panels, white focus glow, a hint bar at the bottom. Colors were sampled from a Big
+ * Picture stream. No Valve logos, artwork or fonts are used; Figtree (OFL) stands in for
+ * Motiva Sans.
+ *
+ * Written for the Tizen 5.5 browser (Chromium 69): no `inset`, no flex `gap`, no
+ * backdrop-filter. */
+
+@font-face {
+    font-family: "Figtree";
+    font-weight: 400;
+    src: url("../fonts/figtree-latin-400.woff2") format("woff2");
+}
+
+@font-face {
+    font-family: "Figtree";
+    font-weight: 500;
+    src: url("../fonts/figtree-latin-500.woff2") format("woff2");
+}
+
+@font-face {
+    font-family: "Figtree";
+    font-weight: 700;
+    src: url("../fonts/figtree-latin-700.woff2") format("woff2");
+}
+
+:root {
+    --bg-top: #03070a;
+    --bg-bottom: #0e151b;
+    --panel: #23282f;
+    --panel-2: #2e3339;
+    --panel-3: #3d4450;
+    --line: #3a424c;
+    --text: #ffffff;
+    --text-2: #dcdedf;
+    --muted: #9aa4ae;
+    --dim: #67707a;
+    --accent: #1a9fff;
+    --accent-2: #4cb4ff;
+    --play-a: #70d61d;
+    --play-b: #01a75b;
+    --ok: #59bf40;
+    --warn: #e5b143;
+    --bad: #e2534b;
+    --remote-red: #d23b3b;
+    --glow: 0 0 0 3px #ffffff, 0 0 26px 4px rgba(170, 210, 255, 0.45);
+    --safe-x: 96px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    color: var(--text);
+    font-family: "Figtree", "SamsungOne", "Roboto", "Helvetica Neue", Arial, sans-serif;
+    font-size: 28px;
+    -webkit-font-smoothing: antialiased;
+}
+
+body {
+    background: radial-gradient(1400px 700px at 18% -10%, rgba(26, 72, 120, 0.35), rgba(26, 72, 120, 0) 70%),
+                linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+}
+
+[hidden] {
+    display: none !important;
+}
+
+.sprites {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+}
+
+svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* Top bar */
+
+.topbar {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 88px;
+    padding: 0 var(--safe-x);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.brand-mark {
+    display: inline-flex;
+    width: 36px;
+    height: 36px;
+    margin-right: 16px;
+    padding: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #ffffff;
+}
+
+.status {
+    display: flex;
+    align-items: center;
+    color: var(--text-2);
+}
+
+.pad-indicator {
+    display: inline-flex;
+    width: 46px;
+    height: 30px;
+    margin-right: 28px;
+    color: var(--text-2);
+}
+
+.clock {
+    font-size: 30px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Screens */
+
+.screen {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+}
+
+#home {
+    padding: 150px var(--safe-x) 0;
+}
+
+.intro h1 {
+    margin: 0;
+    font-size: 64px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.sub {
+    margin: 14px 0 0;
+    color: var(--muted);
+    font-size: 28px;
+}
+
+/* Computer tiles (Steam Link style) */
+
+/* One row that runs off the right edge and scrolls to the focused tile, like a Big Picture
+ * shelf. The padding leaves room for the focus glow and zoom. */
+.tiles {
+    position: relative;
+    display: flex;
+    flex-wrap: nowrap;
+    margin: 40px calc(-1 * var(--safe-x)) 0;
+    padding: 28px var(--safe-x);
+    overflow: hidden;
+    scroll-behavior: smooth;
+}
+
+.tile {
+    position: relative;
+    flex: none;
+    width: 400px;
+    height: 360px;
+    margin-right: 28px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    overflow: hidden;
+    outline: none;
+    transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+.tile .art {
+    height: 210px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(160deg, #34404f 0%, #1c232c 100%);
+    color: #c7d5e0;
+}
+
+.tile.ready .art {
+    background: linear-gradient(160deg, #1f5f99 0%, #12304e 100%);
+    color: #ffffff;
+}
+
+.tile.offline .art {
+    background: linear-gradient(160deg, #2a3038 0%, #181d23 100%);
+    color: var(--dim);
+}
+
+.tile .art svg {
+    width: 104px;
+    height: 104px;
+}
+
+.tile .body {
+    padding: 20px 24px;
+}
+
+.tile .name {
+    font-size: 32px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tile .state {
+    display: flex;
+    align-items: center;
+    margin-top: 8px;
+    color: var(--text-2);
+    font-size: 24px;
+}
+
+.tile .state::before {
+    content: "";
+    width: 12px;
+    height: 12px;
+    margin-right: 12px;
+    border-radius: 50%;
+    background: var(--dim);
+}
+
+.tile.ready .state::before {
+    background: var(--ok);
+    box-shadow: 0 0 10px rgba(89, 191, 64, 0.8);
+}
+
+.tile.unpaired .state::before {
+    background: var(--accent);
+}
+
+.tile.busy .state::before {
+    background: var(--warn);
+}
+
+.tile .meta {
+    margin-top: 6px;
+    color: var(--dim);
+    font-size: 21px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tile.action .art {
+    background: linear-gradient(160deg, #2b323c 0%, #1b2128 100%);
+    color: var(--muted);
+}
+
+.tile.action .art svg {
+    width: 84px;
+    height: 84px;
+}
+
+.tile.focused {
+    transform: scale(1.05);
+    box-shadow: var(--glow);
+    background: var(--panel-3);
+}
+
+.tile.action.focused .art {
+    color: #ffffff;
+}
+
+/* Details for the focused tile, under the shelf */
+
+.details {
+    margin-top: 26px;
+    max-width: 1300px;
+}
+
+.details h2 {
+    margin: 0;
+    font-size: 40px;
+    font-weight: 700;
+}
+
+.details p {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 27px;
+    line-height: 1.45;
+}
+
+/* Footer hint bar */
+
+.footer {
+    position: absolute;
+    z-index: 30;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 76px;
+    padding: 0 var(--safe-x);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(90deg, #242d38 0%, #1a1f25 55%, #12181b 100%);
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.footer-left {
+    color: var(--muted);
+    font-size: 21px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.hints {
+    display: flex;
+    align-items: center;
+}
+
+.hint {
+    display: flex;
+    align-items: center;
+    margin-left: 40px;
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.glyph, .key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 12px;
+    font-family: inherit;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
+.glyph {
+    min-width: 34px;
+    height: 34px;
+    padding: 0 8px;
+    border-radius: 17px;
+    background: #ffffff;
+    color: #11161c;
+    font-size: 19px;
+}
+
+.key {
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 7px;
+    border: 2px solid var(--text-2);
+    color: var(--text);
+    font-size: 17px;
+    letter-spacing: 0.06em;
+}
+
+.key.red {
+    border-color: var(--remote-red);
+    background: var(--remote-red);
+}
+
+/* Dialogs */
+
+.dialog {
+    position: absolute;
+    z-index: 20;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-bottom: 76px;
+    background: rgba(3, 6, 9, 0.82);
+}
+
+.panel {
+    width: 960px;
+    padding: 56px 64px 48px;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #2a3038 0%, #1f242b 100%);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+.panel.wide {
+    width: 1140px;
+}
+
+.eyebrow {
+    margin: 0 0 6px !important;
+    color: var(--accent-2);
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.panel h2 {
+    margin: 0 0 22px;
+    font-size: 46px;
+    font-weight: 700;
+}
+
+.panel p {
+    margin: 12px 0;
+    color: var(--text-2);
+}
+
+.pin {
+    display: flex;
+    justify-content: center;
+    margin: 36px 0 30px;
+}
+
+.pin span {
+    width: 128px;
+    height: 160px;
+    margin: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    border: 2px solid var(--line);
+    background: #0f1419;
+    font-size: 104px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.status {
+    min-height: 1.4em;
+    color: var(--muted) !important;
+}
+
+.status.bad {
+    color: var(--bad) !important;
+}
+
+.note {
+    color: var(--muted) !important;
+    font-size: 22px;
+}
+
+.buttons {
+    display: flex;
+    margin-top: 40px;
+}
+
+.buttons > * + * {
+    margin-left: 20px;
+}
+
+button.focusable {
+    min-width: 220px;
+    padding: 18px 40px;
+    border: 0;
+    border-radius: 6px;
+    outline: none;
+    background: var(--panel-3);
+    color: var(--text);
+    font: inherit;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+button.focusable.primary {
+    background: linear-gradient(90deg, var(--accent) 0%, #0c7fdc 100%);
+}
+
+button.focusable.danger {
+    background: #6b2a2a;
+}
+
+button.focusable.focused {
+    background: #ffffff;
+    color: #11161c;
+    box-shadow: 0 0 22px 2px rgba(170, 210, 255, 0.5);
+    transform: scale(1.04);
+}
+
+input.focusable {
+    width: 100%;
+    margin-top: 18px;
+    padding: 18px 26px;
+    border: 2px solid var(--line);
+    border-radius: 8px;
+    outline: none;
+    background: #0f1419;
+    color: var(--text);
+    font: inherit;
+    font-size: 42px;
+    letter-spacing: 0.04em;
+}
+
+input.focusable.focused {
+    border-color: #ffffff;
+    box-shadow: 0 0 22px 2px rgba(170, 210, 255, 0.35);
+}
+
+/* Settings rows (Big Picture settings style) */
+
+.settings {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.settings li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 88px;
+    padding: 0 28px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    outline: none;
+}
+
+.settings li .label {
+    font-size: 28px;
+    font-weight: 500;
+}
+
+.settings li.focused {
+    background: var(--panel-3);
+    box-shadow: inset 0 0 0 3px #ffffff;
+}
+
+.selector {
+    display: flex;
+    align-items: center;
+    color: var(--text-2);
+    font-weight: 500;
+}
+
+.selector .chev {
+    width: 34px;
+    color: var(--dim);
+    text-align: center;
+    font-size: 34px;
+    line-height: 1;
+}
+
+.settings li.focused .selector .chev {
+    color: #ffffff;
+}
+
+.selector .value {
+    min-width: 170px;
+    text-align: center;
+}
+
+.switch {
+    position: relative;
+    width: 76px;
+    height: 40px;
+    border-radius: 20px;
+    background: #4a525c;
+    transition: background 140ms ease;
+}
+
+.switch::after {
+    content: "";
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #ffffff;
+    transition: transform 140ms ease;
+}
+
+.switch.on {
+    background: var(--accent);
+}
+
+.switch.on::after {
+    transform: translateX(36px);
+}
+
+/* Stream */
+
+body.streaming .topbar, body.streaming .footer {
+    display: none;
+}
+
+.connect-hint {
+    margin: 44px 0 0;
+    color: var(--muted);
+    font-size: 24px;
+}
+
+.connect-hint .key {
+    margin: 0 6px;
+}
+
+.stream {
+    background: #000000;
+}
+
+#tsl-video {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000000;
+}
+
+.overlay {
+    position: absolute;
+    z-index: 2;
+}
+
+.overlay.connecting {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(1200px 700px at 50% 40%, rgba(26, 72, 120, 0.35), rgba(0, 0, 0, 0) 70%),
+                linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+}
+
+.connect-card {
+    text-align: center;
+}
+
+.connect-icon {
+    width: 150px;
+    height: 150px;
+    margin: 0 auto 26px;
+    padding: 28px;
+    border-radius: 50%;
+    background: linear-gradient(160deg, #1f5f99 0%, #12304e 100%);
+    color: #ffffff;
+    box-shadow: 0 0 60px rgba(26, 159, 255, 0.35);
+}
+
+.connect-host {
+    margin: 0 0 30px;
+    font-size: 52px;
+    font-weight: 700;
+}
+
+.connect-text {
+    margin: 26px 0 0;
+    color: var(--text-2);
+    font-size: 30px;
+}
+
+.throbber {
+    display: flex;
+    justify-content: center;
+}
+
+.throbber span {
+    width: 16px;
+    height: 16px;
+    margin: 0 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1100ms ease-in-out infinite;
+}
+
+.throbber span:nth-child(2) {
+    animation-delay: 160ms;
+}
+
+.throbber span:nth-child(3) {
+    animation-delay: 320ms;
+}
+
+.throbber.stopped span {
+    animation: none;
+    background: var(--dim);
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 0.25;
+        transform: scale(0.75);
+    }
+    40% {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.overlay.notice {
+    top: 48px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    padding: 18px 30px;
+    border-radius: 10px;
+    background: rgba(31, 36, 43, 0.94);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    font-size: 26px;
+    transform: translateX(-50%);
+    white-space: nowrap;
+}
+
+.overlay.notice svg {
+    width: 46px;
+    height: 30px;
+    margin-right: 20px;
+    flex: none;
+}
+
+.overlay.notice .glyph, .overlay.notice .key {
+    margin: 0 4px;
+}
+
+.overlay.stats {
+    top: 32px;
+    left: 32px;
+    margin: 0;
+    padding: 16px 22px;
+    border-radius: 8px;
+    background: rgba(15, 20, 25, 0.78);
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 20px;
+    line-height: 1.45;
+}
+
+/* Log overlay (blue key): the app's recent log lines, for reading problems on the TV */
+
+.log-overlay {
+    position: absolute;
+    z-index: 50;
+    left: 48px;
+    right: 48px;
+    bottom: 96px;
+    max-height: 600px;
+    margin: 0;
+    padding: 20px 24px;
+    overflow: hidden;
+    border-radius: 8px;
+    background: rgba(5, 8, 11, 0.92);
+    color: #c7d0d9;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 19px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Toast (bottom right, above the hint bar, like Big Picture notifications) */
+
+.toast {
+    position: absolute;
+    z-index: 40;
+    right: var(--safe-x);
+    bottom: 104px;
+    max-width: 760px;
+    padding: 22px 30px 22px 26px;
+    border-left: 6px solid var(--accent);
+    border-radius: 8px;
+    background: linear-gradient(90deg, #2a3038, #1f242b);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+    font-size: 26px;
+}
+
+.toast.bad {
+    border-left-color: var(--bad);
+}

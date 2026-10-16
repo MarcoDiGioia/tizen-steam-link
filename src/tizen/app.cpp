@@ -1,0 +1,592 @@
+// The WASM side of the TV app. JavaScript calls the functions bound at the bottom of this
+// file (on the browser main thread, which must never block); results come back as events
+// through window.tslEvent(type, json).
+//
+// Threads: ihslib runs its own client and session threads. Anything that can block
+// (creating, joining, destroying a session) runs on `worker_`. Gamepads are polled on
+// their own thread while a stream is up.
+#include <emscripten.h>
+#include <emscripten/bind.h>
+#include <emscripten/html5.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+
+#include "core/client.h"
+#include "core/gamepad.h"
+#include "core/identity.h"
+#include "core/keymap.h"
+#include "core/log.h"
+#include "core/session.h"
+#include "tizen/player.h"
+
+namespace tsl {
+namespace {
+
+std::string JsonEscape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    for (char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+std::string Quote(const std::string &s) { return "\"" + JsonEscape(s) + "\""; }
+
+// Hands an event to JavaScript on the main thread without waiting for it. The strings are
+// copied to the heap because the call may run after this function returned.
+void PostEvent(const std::string &type, const std::string &json) {
+    char *t = strdup(type.c_str());
+    char *j = strdup(json.c_str());
+    MAIN_THREAD_ASYNC_EM_ASM(
+            {
+                var type = UTF8ToString($0);
+                var data = UTF8ToString($1);
+                _free($0);
+                _free($1);
+                if (typeof window.tslEvent === 'function') {
+                    window.tslEvent(type, data);
+                }
+            },
+            t, j);
+}
+
+void LogToConsole(IHS_LogLevel level, const char *tag, const char *message) {
+    std::printf("[%s %s] %s\n", IHS_LogLevelName(level), tag, message);
+    // Info and above also go to the UI's log overlay (blue key), the only log a TV user
+    // can read without sdb.
+    if (level <= IHS_LogLevelInfo) {
+        PostEvent("log", "{\"level\":" + std::to_string(level) + ",\"tag\":" + Quote(tag) +
+                                 ",\"message\":" + Quote(message) + "}");
+    }
+}
+
+std::string HostJson(const Host &host) {
+    return "{\"ip\":" + Quote(host.address()) + ",\"hostname\":" + Quote(host.hostname()) +
+           ",\"ostype\":" + std::to_string(host.info.ostype) + ",\"universe\":" +
+           std::to_string(host.info.universe) + ",\"gamesRunning\":" + (host.info.gamesRunning ? "true" : "false") +
+           "}";
+}
+
+// A single thread that runs posted jobs in order.
+class Worker {
+public:
+    Worker() : thread_([this] { Run(); }) {}
+    ~Worker() {
+        Post(nullptr);
+        thread_.join();
+    }
+    void Post(std::function<void()> job) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        jobs_.push_back(std::move(job));
+        cond_.notify_one();
+    }
+
+private:
+    void Run() {
+        for (;;) {
+            std::function<void()> job;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cond_.wait(lock, [this] { return !jobs_.empty(); });
+                job = std::move(jobs_.front());
+                jobs_.pop_front();
+            }
+            if (!job) return;
+            job();
+        }
+    }
+    std::mutex mutex_;
+    std::condition_variable cond_;
+    std::deque<std::function<void()>> jobs_;
+    std::thread thread_;
+};
+
+struct StreamParams {
+    std::string ip;
+    uint64_t steamId = 0;
+    HostKey key{};
+    StreamRequest request;
+    SessionOptions options;
+};
+
+class App : public Client::Listener, public Session::Listener {
+public:
+    App() : player_("tsl-video") {}
+
+    ~App() override {
+        polling_ = false;
+        if (gamepadThread_.joinable()) gamepadThread_.join();
+    }
+
+    bool Init(const std::string &serialized) {
+        if (client_) return true;
+        auto identity = Identity::Parse(serialized);
+        if (!identity) return false;
+        identity_ = *identity;
+        client_ = std::make_unique<Client>(identity_, this);
+        client_->CheckTimerThread();
+        polling_ = true;
+        gamepadThread_ = std::thread([this] { PollGamepads(); });
+        return true;
+    }
+
+    void StartDiscovery() {
+        if (client_) client_->StartDiscovery(2000);
+    }
+
+    void StopDiscovery() {
+        if (client_) client_->StopDiscovery();
+    }
+
+    bool Probe(const std::string &ip) { return client_ && client_->Probe(ip); }
+
+    bool Pair(const std::string &ip, const std::string &pin) {
+        if (!client_) return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pairActive_) return false;  // ihslib runs one pairing at a time
+            pendingPair_ = ip;
+            pendingPin_ = pin;
+        }
+        // The host answers the probe through OnHostFound, which starts the pairing.
+        return client_->Probe(ip);
+    }
+
+    // Only cancels a pairing ihslib is still running. Once it reported a result, its task and
+    // state are being freed on the timer thread and IHS_ClientAuthorizationCancel would read
+    // them. Runs on the worker, after any queued Pair job.
+    void CancelPair() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pendingPair_.clear();
+        }
+        worker_.Post([this] {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!pairActive_) return;
+                pairActive_ = false;
+            }
+            client_->CancelPair();
+        });
+    }
+
+    bool StartStream(const StreamParams &params) {
+        if (!client_) return false;
+        {
+            std::lock_guard<std::mutex> lock(sessionMutex_);
+            if (session_) return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pendingStream_) return false;
+            pendingStream_ = params;
+            streamRequested_ = false;
+        }
+        return client_->Probe(params.ip);
+    }
+
+    void StopStream() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pendingStream_.reset();
+            streamRequested_ = false;
+        }
+        worker_.Post([this] {
+            if (auto session = CurrentSession()) session->Disconnect();
+        });
+    }
+
+    void Key(const std::string &code, bool down) {
+        uint32_t scancode = ScancodeFromDomCode(code);
+        if (scancode == 0) return;
+        if (auto session = CurrentSession()) session->SendKey(scancode, down);
+    }
+
+    void MouseMove(int dx, int dy) {
+        if (auto session = CurrentSession()) session->SendMouseMove(dx, dy);
+    }
+
+    void MouseButton(int domButton, bool down) {
+        IHS_StreamInputMouseButton button;
+        switch (domButton) {
+            case 0: button = IHS_MOUSE_BUTTON_LEFT; break;
+            case 1: button = IHS_MOUSE_BUTTON_MIDDLE; break;
+            case 2: button = IHS_MOUSE_BUTTON_RIGHT; break;
+            case 3: button = IHS_MOUSE_BUTTON_X1; break;
+            case 4: button = IHS_MOUSE_BUTTON_X2; break;
+            default: return;
+        }
+        if (auto session = CurrentSession()) session->SendMouseButton(button, down);
+    }
+
+    void MouseWheel(int deltaY) {
+        if (deltaY == 0) return;
+        if (auto session = CurrentSession()) {
+            session->SendMouseWheel(deltaY < 0 ? IHS_MOUSE_WHEEL_UP : IHS_MOUSE_WHEEL_DOWN);
+        }
+    }
+
+    std::string Stats() {
+        SessionStats s;
+        bool active = false;
+        if (auto session = CurrentSession()) {
+            s = session->Stats();
+            active = session->connected();
+        }
+        Player::Counters c = player_.counters();
+        return "{\"connected\":" + std::string(active ? "true" : "false") +
+               ",\"videoFrames\":" + std::to_string(s.videoFrames) + ",\"keyFrames\":" +
+               std::to_string(s.keyFrames) + ",\"videoBytes\":" + std::to_string(s.videoBytes) +
+               ",\"audioPackets\":" + std::to_string(s.audioPackets) + ",\"width\":" + std::to_string(s.width) +
+               ",\"height\":" + std::to_string(s.height) + ",\"videoCodec\":" + std::to_string(s.videoCodec) +
+               ",\"targetBitrate\":" + std::to_string(s.targetBitrate) + ",\"framerateNum\":" +
+               std::to_string(s.framerateNum) + ",\"framerateDen\":" + std::to_string(s.framerateDen) +
+               ",\"videoAppended\":" + std::to_string(c.videoAppended) + ",\"videoFailed\":" +
+               std::to_string(c.videoFailed) + ",\"audioAppended\":" + std::to_string(c.audioAppended) +
+               ",\"audioFailed\":" + std::to_string(c.audioFailed) + ",\"silenceFilled\":" +
+               std::to_string(c.silenceFilled) + ",\"audioDropped\":" + std::to_string(c.audioDropped) + "}";
+    }
+
+    // Client::Listener (ihslib client thread)
+
+    void OnHostFound(const Host &host) override {
+        std::string ip = host.address();
+        bool pair = false, stream = false;
+        std::string pin;
+        StreamParams params;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            hosts_[ip] = host;
+            if (pendingPair_ == ip) {
+                pair = true;
+                pin = pendingPin_;
+                pendingPair_.clear();
+            }
+            if (pendingStream_ && pendingStream_->ip == ip && !streamRequested_) {
+                stream = true;
+                streamRequested_ = true;
+                params = *pendingStream_;
+            }
+        }
+        PostEvent("hostFound", HostJson(host));
+        if (pair) {
+            worker_.Post([this, host, pin] {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (pairActive_) return;
+                    pairActive_ = true;
+                }
+                if (!client_->Pair(host, pin)) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        pairActive_ = false;
+                    }
+                    PostEvent("pairFailed", "{\"ip\":" + Quote(host.address()) +
+                                                    ",\"reason\":\"could not start pairing\"}");
+                }
+            });
+        }
+        if (stream) {
+            worker_.Post([this, host, params] {
+                if (!client_->RequestStream(host, params.request, params.key)) {
+                    FailStream("could not send the streaming request");
+                }
+            });
+        }
+    }
+
+    void OnPairProgress(const Host &host) override {
+        PostEvent("pairProgress", "{\"ip\":" + Quote(host.address()) + "}");
+    }
+
+    void OnPairSucceeded(const Host &host, uint64_t steamId, const HostKey &key) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pairActive_ = false;
+        }
+        // The UI stores the key with the host and hands it back to startStream.
+        PostEvent("pairSucceeded", "{\"ip\":" + Quote(host.address()) + ",\"hostname\":" + Quote(host.hostname()) +
+                                           ",\"steamId\":\"" + std::to_string(steamId) + "\",\"key\":\"" +
+                                           HexEncode(key.data(), key.size()) + "\"}");
+    }
+
+    void OnPairFailed(const Host &host, IHS_AuthorizationResult result) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pairActive_ = false;
+        }
+        PostEvent("pairFailed", "{\"ip\":" + Quote(host.address()) + ",\"result\":" + std::to_string(result) +
+                                        ",\"reason\":" + Quote(AuthorizationResultName(result)) + "}");
+    }
+
+    void OnStreamProgress(const Host &host) override {
+        PostEvent("streamProgress", "{\"ip\":" + Quote(host.address()) + "}");
+    }
+
+    void OnStreamReady(const Host &host, const IHS_SessionInfo &info) override {
+        std::string ip = host.address();
+        worker_.Post([this, info, ip] {
+            StreamParams params;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // Canceled meanwhile, or a late answer to an earlier request.
+                if (!pendingStream_ || pendingStream_->ip != ip) return;
+                params = *pendingStream_;
+            }
+            IHS_SessionInfo sessionInfo = info;
+            sessionInfo.steamId = params.steamId;
+            player_.SetHevcSupported(params.options.hevc);
+            player_.SetAudioEnabled(params.options.audio);
+            auto session =
+                    std::make_shared<Session>(identity_, params.key, sessionInfo, params.options, &player_, this);
+            session->SetRumbleCallback(OnRumble, nullptr);
+            if (!session->Connect()) {
+                FailStream("could not start the session");
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(sessionMutex_);
+                session_ = session;
+            }
+            PostEvent("streamStarting", "{}");
+        });
+    }
+
+    void OnStreamFailed(const Host &, IHS_StreamingResult result) override {
+        FailStream(StreamingResultName(result), result);
+    }
+
+    // Session::Listener (ihslib session threads)
+
+    void OnSessionConnected() override {
+        streaming_ = true;
+        PostEvent("streamConnected", "{}");
+    }
+
+    void OnSessionDisconnected() override {
+        streaming_ = false;
+        PostEvent("streamDisconnected", "{}");
+    }
+
+    void OnSessionFinalized() override {
+        streaming_ = false;
+        // Runs on the session thread itself, which Join() waits for: hand off.
+        worker_.Post([this] {
+            std::shared_ptr<Session> session;
+            {
+                std::lock_guard<std::mutex> lock(sessionMutex_);
+                session = std::move(session_);
+            }
+            if (session) {
+                session->Join();
+                // Input calls may still hold a copy for a moment. Destroy it here, not on
+                // whichever thread happens to drop the last reference.
+                while (session.use_count() > 1) usleep(1000);
+                session.reset();
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pendingStream_.reset();
+                streamRequested_ = false;
+            }
+            PostEvent("streamEnded", "{}");
+        });
+    }
+
+private:
+    std::shared_ptr<Session> CurrentSession() {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        return session_;
+    }
+
+    void FailStream(const std::string &reason, int result = -1) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pendingStream_.reset();
+            streamRequested_ = false;
+        }
+        PostEvent("streamFailed", "{\"result\":" + std::to_string(result) + ",\"reason\":" + Quote(reason) + "}");
+    }
+
+    static void OnRumble(int slot, uint16_t low, uint16_t high, uint32_t durationMs, void *) {
+        PostEvent("rumble", "{\"slot\":" + std::to_string(slot) + ",\"low\":" + std::to_string(low) +
+                                    ",\"high\":" + std::to_string(high) + ",\"ms\":" + std::to_string(durationMs) +
+                                    "}");
+    }
+
+    void PollGamepads() {
+        const uint16_t exitCombo = (1u << TSL_PAD_LEFT_SHOULDER) | (1u << TSL_PAD_RIGHT_SHOULDER) |
+                                   (1u << TSL_PAD_BACK) | (1u << TSL_PAD_START);
+        bool exitSent = false;
+        bool padConnected[TSL_GAMEPAD_SLOTS] = {};
+        const Session *lastSession = nullptr;
+        while (polling_) {
+            std::shared_ptr<Session> session = streaming_ ? CurrentSession() : nullptr;
+            if (!session) {
+                exitSent = false;
+                usleep(50 * 1000);
+                continue;
+            }
+            if (session.get() != lastSession) {
+                // A new session knows no pads yet; announce every connected one again.
+                lastSession = session.get();
+                for (bool &c : padConnected) c = false;
+            }
+            if (emscripten_sample_gamepad_data() != EMSCRIPTEN_RESULT_SUCCESS) {
+                usleep(200 * 1000);
+                continue;
+            }
+            int count = emscripten_get_num_gamepads();
+            for (int i = 0; i < TSL_GAMEPAD_SLOTS; i++) {
+                EmscriptenGamepadEvent pad;
+                bool connected = i < count && emscripten_get_gamepad_status(i, &pad) == EMSCRIPTEN_RESULT_SUCCESS &&
+                                 pad.connected;
+                if (connected != padConnected[i]) {
+                    TSL_GamepadInfo info{};
+                    if (connected) {
+                        TSL_GamepadParseIds(pad.id, &info.vendorId, &info.productId);
+                        std::snprintf(info.name, sizeof(info.name), "%s", pad.id);
+                    }
+                    session->SetGamepadConnected(i, connected, &info);
+                    padConnected[i] = connected;
+                    PostEvent(connected ? "gamepadConnected" : "gamepadDisconnected",
+                              "{\"slot\":" + std::to_string(i) + ",\"id\":" + Quote(connected ? pad.id : "") + "}");
+                }
+                if (!connected) continue;
+                bool pressed[64];
+                int buttons = pad.numButtons < 64 ? pad.numButtons : 64;
+                for (int b = 0; b < buttons; b++) pressed[b] = pad.digitalButton[b] != 0;
+                TSL_GamepadState state;
+                TSL_GamepadStateFromStandard(pad.axis, static_cast<size_t>(pad.numAxes), pad.analogButton, pressed,
+                                             static_cast<size_t>(buttons), &state);
+                session->UpdateGamepad(i, state);
+                if ((state.buttons & exitCombo) == exitCombo && !exitSent) {
+                    exitSent = true;
+                    PostEvent("exitCombo", "{}");
+                }
+            }
+            session.reset();
+            usleep(4 * 1000);
+        }
+    }
+
+    Identity identity_;
+    std::unique_ptr<Client> client_;
+    Player player_;
+    Worker worker_;
+
+    std::mutex mutex_;
+    std::map<std::string, Host> hosts_;
+    std::string pendingPair_, pendingPin_;
+    bool pairActive_ = false;
+    std::optional<StreamParams> pendingStream_;
+    bool streamRequested_ = false;
+
+    // Guards the pointer only. Callers copy it and call the session without the lock, so
+    // the main thread never waits behind a slow ihslib call on another thread.
+    std::mutex sessionMutex_;
+    std::shared_ptr<Session> session_;
+
+    std::atomic<bool> polling_{false};
+    std::atomic<bool> streaming_{false};
+    std::thread gamepadThread_;
+};
+
+App *g_app = nullptr;
+
+// Bound functions. All run on the browser main thread.
+
+std::string CreateIdentity(const std::string &randomHex, const std::string &name) {
+    uint8_t bytes[Identity::kRandomBytes];
+    if (!HexDecode(randomHex, bytes, sizeof(bytes)) || name.empty()) return "";
+    return Identity::FromRandom(bytes, name).Serialize();
+}
+
+bool Init(const std::string &identity) { return g_app->Init(identity); }
+void StartDiscovery() { g_app->StartDiscovery(); }
+void StopDiscovery() { g_app->StopDiscovery(); }
+bool Probe(const std::string &ip) { return g_app->Probe(ip); }
+bool Pair(const std::string &ip, const std::string &pin) { return g_app->Pair(ip, pin); }
+void CancelPair() { g_app->CancelPair(); }
+
+bool StartStream(const std::string &ip, const std::string &steamId, const std::string &keyHex, int maxWidth,
+                 int maxHeight, bool hevc, bool audio, bool bigPicture) {
+    StreamParams params;
+    params.ip = ip;
+    params.steamId = std::strtoull(steamId.c_str(), nullptr, 10);
+    if (!HexDecode(keyHex, params.key.data(), params.key.size())) return false;
+    params.request.maxWidth = maxWidth;
+    params.request.maxHeight = maxHeight;
+    params.request.interface = bigPicture ? IHS_StreamInterfaceBigPicture : IHS_StreamInterfaceDefault;
+    params.options.hevc = hevc;
+    params.options.audio = audio;
+    return g_app->StartStream(params);
+}
+
+void StopStream() { g_app->StopStream(); }
+void Key(const std::string &code, bool down) { g_app->Key(code, down); }
+void MouseMove(int dx, int dy) { g_app->MouseMove(dx, dy); }
+void MouseButton(int button, bool down) { g_app->MouseButton(button, down); }
+void MouseWheel(int deltaY) { g_app->MouseWheel(deltaY); }
+std::string Stats() { return g_app->Stats(); }
+void SetLogLevel(int level) { tsl::SetLogLevel(static_cast<IHS_LogLevel>(level)); }
+
+}  // namespace
+}  // namespace tsl
+
+int main() {
+    tsl::SetLogSink(tsl::LogToConsole);
+    tsl::SetLogLevel(IHS_LogLevelInfo);
+    IHS_Init();
+    tsl::g_app = new tsl::App();
+    EM_ASM({
+        if (typeof window.tslReady === 'function') window.tslReady();
+    });
+    return 0;
+}
+
+EMSCRIPTEN_BINDINGS(tsl) {
+    emscripten::function("createIdentity", &tsl::CreateIdentity);
+    emscripten::function("init", &tsl::Init);
+    emscripten::function("startDiscovery", &tsl::StartDiscovery);
+    emscripten::function("stopDiscovery", &tsl::StopDiscovery);
+    emscripten::function("probe", &tsl::Probe);
+    emscripten::function("pair", &tsl::Pair);
+    emscripten::function("cancelPair", &tsl::CancelPair);
+    emscripten::function("startStream", &tsl::StartStream);
+    emscripten::function("stopStream", &tsl::StopStream);
+    emscripten::function("key", &tsl::Key);
+    emscripten::function("mouseMove", &tsl::MouseMove);
+    emscripten::function("mouseButton", &tsl::MouseButton);
+    emscripten::function("mouseWheel", &tsl::MouseWheel);
+    emscripten::function("stats", &tsl::Stats);
+    emscripten::function("setLogLevel", &tsl::SetLogLevel);
+}

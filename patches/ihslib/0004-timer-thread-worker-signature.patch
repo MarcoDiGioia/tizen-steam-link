@@ -1,0 +1,29 @@
+Give the timer thread worker the IHS_ThreadFunction signature.
+
+TimerThreadWorker was declared without a prototype and handed to IHS_ThreadCreate, which
+calls it as void (*)(void *). Native builds don't mind, but Emscripten fastcomp keeps one
+function table per signature: the worker sits in the "v" table and the thread entry calls
+the same index in the "vi" table, which holds some other function. The timer thread then
+never runs a task, so discovery broadcasts, pairing and streaming requests are never sent.
+
+--- a/src/ihs_timer.c	2026-10-16 12:26:35.229874982 -0500
++++ b/src/ihs_timer.c	2026-10-16 12:26:35.237375692 -0500
+@@ -52,7 +52,7 @@
+     IHS_Thread *thread;
+ } state = {NULL, NULL, NULL};
+ 
+-static void TimerThreadWorker();
++static void TimerThreadWorker(void *context);
+ 
+ static bool ItemIdentical(IHS_QueueItem *item, void *context);
+ 
+@@ -187,7 +187,8 @@
+     return (uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000;
+ }
+ 
+-static void TimerThreadWorker() {
++static void TimerThreadWorker(void *context) {
++    (void) context;
+     size_t iterated;
+     do {
+         IHS_MutexLock(state.lock);

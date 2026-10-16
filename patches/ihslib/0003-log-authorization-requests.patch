@@ -1,0 +1,48 @@
+Log the authorization request sends.
+
+When the request is built, whether the ticket encryption worked, and whether the request
+went out (the first three sends and every failure). Without it a request that never
+leaves the device looks the same as one the host ignores.
+
+diff -ruN a/src/client/authorization.c b/src/client/authorization.c
+--- a/src/client/authorization.c	2026-10-16 12:12:34.856903725 -0500
++++ b/src/client/authorization.c	2026-10-16 12:12:45.082576811 -0500
+@@ -163,6 +163,10 @@
+     (void) runCount;
+     IHS_AuthorizationState *state = data;
+     IHS_Client *client = state->client;
++    if (runCount == 0) {
++        IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Building the authorization request for %s",
++                      state->host.hostname);
++    }
+     uint8_t pubKey[384];
+     size_t pubKeyLen = sizeof(pubKey);
+     IHS_ClientAuthorizationPubKey(client, state->host.universe, pubKey, &pubKeyLen);
+@@ -178,8 +182,11 @@
+     /* RSA encrypt ticket data */
+     uint8_t encryptedTicket[2048];
+     ProtobufCBinaryData encryptedRequest = {.data = encryptedTicket, .len = sizeof(encryptedTicket)};
+-    IHS_CryptoRSAEncrypt(serTicket, serTicketLen, pubKey, pubKeyLen, encryptedRequest.data,
+-                         &encryptedRequest.len);
++    int encryptRet = IHS_CryptoRSAEncrypt(serTicket, serTicketLen, pubKey, pubKeyLen, encryptedRequest.data,
++                                          &encryptedRequest.len);
++    if (encryptRet != 0) {
++        IHS_ClientLog(client, IHS_LogLevelWarn, "Client", "Authorization ticket encryption failed: %d", encryptRet);
++    }
+ 
+     uint8_t authKey[IHS_CRYPTO_X25519_KEY_SIZE];
+     IHS_AuthorizationKeyExchangeMaskedKey(&state->keyExchange, authKey);
+@@ -195,7 +202,12 @@
+     request.request_id = state->requestId;
+ 
+     IHS_SocketAddress address = state->host.address;
+-    IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationRequest, (ProtobufCMessage *) &request);
++    bool sent = IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationRequest, (ProtobufCMessage *) &request);
++    if (runCount < 3 || !sent) {
++        IHS_ClientLog(client, sent ? IHS_LogLevelInfo : IHS_LogLevelWarn, "Client",
++                      "Authorization request #%d to %s: %s", runCount + 1, state->host.hostname,
++                      sent ? "sent" : "send failed");
++    }
+     return 1000;
+ }
+ 

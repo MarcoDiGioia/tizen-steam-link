@@ -1,0 +1,571 @@
+// Unit tests for the shared core. No framework: each test is a function, CHECK records
+// failures, main() runs everything and returns non-zero if anything failed.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "core/client.h"
+#include "core/gamepad.h"
+#include "core/identity.h"
+#include "core/keymap.h"
+#include "core/log.h"
+#include "core/session.h"
+
+extern "C" {
+#include "hid/device.h"
+#include "hid/manager.h"
+#include "hid/provider.h"
+#include "ihs_buffer.h"
+#include "ihs_enumeration.h"
+#include "protobuf/discovery.pb-c.h"
+#include "session/window.h"
+}
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+
+#define CHECK(cond)                                                              \
+    do {                                                                         \
+        g_checks++;                                                              \
+        if (!(cond)) {                                                           \
+            g_failures++;                                                        \
+            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
+        }                                                                        \
+    } while (0)
+
+#define CHECK_EQ(a, b) CHECK((a) == (b))
+
+void TestIdentityRoundTrip() {
+    uint8_t random[tsl::Identity::kRandomBytes];
+    for (size_t i = 0; i < sizeof(random); i++) random[i] = static_cast<uint8_t>(i * 7 + 1);
+    tsl::Identity id = tsl::Identity::FromRandom(random, "Living room: TV");
+    CHECK_EQ(id.deviceId, 0x01080f161d242b32ULL);
+    CHECK_EQ(id.secret[0], random[8]);
+    CHECK_EQ(id.secret[31], random[39]);
+
+    std::string text = id.Serialize();
+    CHECK(text.rfind("tsl1:01080f161d242b32:", 0) == 0);
+    auto parsed = tsl::Identity::Parse(text + "\n");
+    CHECK(parsed.has_value());
+    if (parsed) {
+        CHECK_EQ(parsed->deviceId, id.deviceId);
+        CHECK(parsed->secret == id.secret);
+        CHECK_EQ(parsed->name, "Living room: TV");
+    }
+
+    CHECK(!tsl::Identity::Parse("").has_value());
+    CHECK(!tsl::Identity::Parse("tsl1:zz").has_value());
+    CHECK(!tsl::Identity::Parse(text.substr(0, text.size() - 15)).has_value());
+    std::string noName = text.substr(0, text.find(':', 22) + 1);
+    CHECK(!tsl::Identity::Parse(noName).has_value());
+
+    IHS_ClientConfig config = id.ClientConfig();
+    CHECK_EQ(config.deviceId, id.deviceId);
+    CHECK(config.secretKey == id.secret.data());
+}
+
+void TestPin() {
+    CHECK_EQ(tsl::FormatPin(0), "0000");
+    CHECK_EQ(tsl::FormatPin(42), "0042");
+    CHECK_EQ(tsl::FormatPin(123456789), "6789");
+}
+
+void TestKeymap() {
+    CHECK_EQ(tsl::ScancodeFromDomCode("KeyA"), 4u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("KeyZ"), 29u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("Digit1"), 30u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("Digit0"), 39u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("Enter"), 40u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("Escape"), 41u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("ArrowUp"), 82u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("F12"), 69u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("ShiftLeft"), 225u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("MetaRight"), 231u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("Keya"), 0u);
+    CHECK_EQ(tsl::ScancodeFromDomCode("Unidentified"), 0u);
+    CHECK_EQ(tsl::ScancodeFromDomCode(""), 0u);
+}
+
+void TestGamepadMapping() {
+    double axes[4] = {-1.0, 0.5, 1.0, -0.25};
+    double values[17] = {0};
+    bool pressed[17] = {false};
+    pressed[0] = true;   // A
+    pressed[4] = true;   // LB
+    pressed[9] = true;   // Start
+    pressed[12] = true;  // D-pad up
+    pressed[16] = true;  // Home
+    values[6] = 1.0;     // LT fully pressed
+    values[7] = 0.5;     // RT half
+    pressed[6] = true;   // triggers are analog, the pressed flag must not set a button bit
+    TSL_GamepadState s;
+    TSL_GamepadStateFromStandard(axes, 4, values, pressed, 17, &s);
+    uint16_t expected = (1u << TSL_PAD_A) | (1u << TSL_PAD_LEFT_SHOULDER) | (1u << TSL_PAD_START) |
+                        (1u << TSL_PAD_DPAD_UP) | (1u << TSL_PAD_GUIDE);
+    CHECK_EQ(s.buttons, expected);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_LEFT_X], -32768);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_LEFT_Y], 16383);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_RIGHT_X], 32767);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_RIGHT_Y], -8192);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_TRIGGER_LEFT], 32767);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_TRIGGER_RIGHT], 16383);
+
+    // Short arrays (a pad with fewer buttons) leave the rest released.
+    TSL_GamepadStateFromStandard(axes, 2, values, pressed, 4, &s);
+    CHECK_EQ(s.buttons, static_cast<uint16_t>(1u << TSL_PAD_A));
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_RIGHT_X], 0);
+    CHECK_EQ(s.axes[TSL_PAD_AXIS_TRIGGER_LEFT], 0);
+
+    // NaN and out of range values are clamped.
+    double bad[4] = {0.0 / 0.0, 5.0, -5.0, 0.0};
+    TSL_GamepadStateFromStandard(bad, 4, nullptr, nullptr, 0, &s);
+    CHECK_EQ(s.axes[0], 0);
+    CHECK_EQ(s.axes[1], 32767);
+    CHECK_EQ(s.axes[2], -32768);
+}
+
+void TestGamepadIds() {
+    uint16_t v = 1, p = 1;
+    CHECK(TSL_GamepadParseIds("Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)", &v, &p));
+    CHECK_EQ(v, 0x045e);
+    CHECK_EQ(p, 0x02fd);
+    CHECK(TSL_GamepadParseIds("054c-0ce6-DualSense Wireless Controller", &v, &p));
+    CHECK_EQ(v, 0x054c);
+    CHECK_EQ(p, 0x0ce6);
+    CHECK(!TSL_GamepadParseIds("Generic USB Joystick", &v, &p));
+    CHECK_EQ(v, 0);
+    CHECK_EQ(p, 0);
+    CHECK(!TSL_GamepadParseIds("Pad (Vendor: 04", &v, &p));
+    CHECK(!TSL_GamepadParseIds(nullptr, &v, &p));
+}
+
+void TestGamepadReportLayout() {
+    TSL_GamepadState s{};
+    s.buttons = 0xA55A;
+    s.axes[0] = -2;      // 0xFFFE
+    s.axes[5] = 0x1234;
+    uint8_t report[TSL_GAMEPAD_REPORT_SIZE];
+    TSL_GamepadPackReport(&s, 3, report);
+    CHECK_EQ(report[0], 0xFE);
+    CHECK_EQ(report[1], 0xFF);
+    CHECK_EQ(report[10], 0x34);
+    CHECK_EQ(report[11], 0x12);
+    for (int i = 12; i < 16; i++) CHECK_EQ(report[i], 0);
+    CHECK_EQ(report[16], 0x5A);
+    CHECK_EQ(report[17], 0xA5);
+    CHECK_EQ(report[27], 3);
+    for (int i = 28; i < 48; i++) CHECK_EQ(report[i], 0);
+}
+
+struct RumbleLog {
+    int calls = 0;
+    int slot = -1;
+    uint16_t low = 0, high = 0;
+    uint32_t duration = 0;
+};
+
+void RecordRumble(int slot, uint16_t low, uint16_t high, uint32_t duration, void *context) {
+    auto *log = static_cast<RumbleLog *>(context);
+    log->calls++;
+    log->slot = slot;
+    log->low = low;
+    log->high = high;
+    log->duration = duration;
+}
+
+void TestGamepadProvider() {
+    IHS_HIDProvider *provider = TSL_GamepadProviderCreate();
+    IHS_HIDManager *manager = IHS_HIDManagerCreate();
+    IHS_HIDManagerAddProvider(manager, provider);
+
+    // Nothing connected: empty enumeration, open fails.
+    IHS_Enumeration *e = IHS_HIDProviderEnumerateDevices(provider);
+    CHECK_EQ(IHS_EnumerationCount(e), 0u);
+    IHS_EnumerationFree(e);
+    CHECK(IHS_HIDManagerOpenDevice(manager, "tsl://1") == nullptr);
+
+    TSL_GamepadInfo info{};
+    info.vendorId = 0x045e;
+    info.productId = 0x02ea;
+    std::snprintf(info.name, sizeof(info.name), "Xbox Wireless Controller");
+    CHECK(TSL_GamepadProviderSetConnected(provider, 1, true, &info));
+    CHECK(!TSL_GamepadProviderSetConnected(provider, 1, true, &info));
+    CHECK(!TSL_GamepadProviderSetConnected(provider, 9, true, &info));
+
+    e = IHS_HIDProviderEnumerateDevices(provider);
+    CHECK_EQ(IHS_EnumerationCount(e), 1u);
+    IHS_EnumerationReset(e);
+    IHS_HIDDeviceInfo hid{};
+    IHS_HIDProviderDeviceInfo(provider, e, &hid);
+    CHECK(hid.path != nullptr && std::strcmp(hid.path, "tsl://1") == 0);
+    CHECK(hid.product_string != nullptr && std::strcmp(hid.product_string, "Xbox Wireless Controller") == 0);
+    CHECK_EQ(hid.vendor_id, 0x045e);
+    CHECK_EQ(hid.product_id, 0x02ea);
+    IHS_EnumerationNext(e);
+    CHECK(IHS_EnumerationEnded(e));
+    IHS_EnumerationFree(e);
+
+    CHECK(!IHS_HIDProviderSupportsDevice(provider, "sdl://1"));
+    CHECK(!IHS_HIDProviderSupportsDevice(provider, "tsl://4"));
+    CHECK(!IHS_HIDProviderSupportsDevice(provider, "tsl://1x"));
+    CHECK(IHS_HIDProviderSupportsDevice(provider, "tsl://0"));
+
+    IHS_HIDManagedDevice *managed = IHS_HIDManagerOpenDevice(manager, "tsl://1");
+    CHECK(managed != nullptr);
+    if (managed != nullptr) {
+        IHS_HIDDevice *device = managed->device;
+
+        // Nothing goes out before Steam starts input reports, even with input pending.
+        TSL_GamepadState early{};
+        early.buttons = 1u << TSL_PAD_A;
+        TSL_GamepadProviderUpdate(provider, 1, &early);
+        IHS_HIDDeviceLock(device);
+        CHECK_EQ(device->cls->poll(device), 0);
+        IHS_HIDDeviceUnlock(device);
+
+        // What control_hid.c does for DeviceStartInputReports.
+        IHS_HIDReportHolderSetReportLength(&managed->reportHolder, TSL_GAMEPAD_REPORT_SIZE);
+        CHECK_EQ(IHS_HIDDeviceStartInputReports(device, TSL_GAMEPAD_REPORT_SIZE), 0);
+
+        // The input held back until now goes out, then nothing while the state stays the same.
+        IHS_HIDDeviceLock(device);
+        CHECK_EQ(device->cls->poll(device), 1);
+        CHECK_EQ(device->cls->poll(device), 0);
+        IHS_HIDDeviceUnlock(device);
+
+        TSL_GamepadState state{};
+        state.buttons = 1u << TSL_PAD_B;
+        TSL_GamepadProviderUpdate(provider, 1, &state);
+        IHS_HIDDeviceLock(device);
+        CHECK_EQ(device->cls->poll(device), 1);
+        CHECK_EQ(device->cls->poll(device), 0);
+        IHS_HIDDeviceUnlock(device);
+        CHECK(IHS_HIDReportHolderGetMessage(&managed->reportHolder) != nullptr);
+
+        // Caps feature report: same 20-byte layout as ihslib's SDL backend.
+        IHS_Buffer buf;
+        IHS_BufferInit(&buf, 64, 64);
+        uint8_t number = 0x04;
+        CHECK_EQ(IHS_HIDDeviceGetFeatureReport(device, &number, 1, &buf, 64), 0);
+        CHECK_EQ(buf.size, 21u);
+        const uint8_t *p = IHS_BufferPointer(&buf);
+        CHECK_EQ(p[0], 0x04);
+        CHECK_EQ(p[1], 1);   // valid
+        CHECK_EQ(p[2], 0);   // not xinput
+        int32_t type, player;
+        std::memcpy(&type, p + 3, 4);
+        std::memcpy(&player, p + 7, 4);
+        CHECK_EQ(type, 30);
+        CHECK_EQ(player, 1);
+        IHS_BufferClear(&buf, true);
+
+        // Rumble write reaches the callback; requested report version lands in byte 27.
+        RumbleLog rumble;
+        TSL_GamepadProviderSetRumbleCallback(provider, RecordRumble, &rumble);
+        const uint8_t rumbleCmd[9] = {0x01, 0x34, 0x12, 0x78, 0x56, 0xE8, 0x03, 0x00, 0x00};
+        CHECK_EQ(IHS_HIDDeviceWrite(device, rumbleCmd, sizeof(rumbleCmd)), 0);
+        CHECK_EQ(rumble.calls, 1);
+        CHECK_EQ(rumble.slot, 1);
+        CHECK_EQ(rumble.low, 0x1234);
+        CHECK_EQ(rumble.high, 0x5678);
+        CHECK_EQ(rumble.duration, 1000u);
+        const uint8_t versionCmd[9] = {0x09, 0x02};
+        CHECK_EQ(IHS_HIDDeviceWrite(device, versionCmd, sizeof(versionCmd)), 0);
+        IHS_HIDDeviceLock(device);
+        CHECK_EQ(device->cls->poll(device), 1);  // version byte changed the report
+        IHS_HIDDeviceUnlock(device);
+        const uint8_t unknownCmd[9] = {0x7f};
+        CHECK_EQ(IHS_HIDDeviceWrite(device, unknownCmd, sizeof(unknownCmd)), -1);
+
+        // Unplugged while buttons are held: one delta to a released pad, then quiet. The
+        // device stays open until Steam closes it.
+        TSL_GamepadState held{};
+        held.buttons = 1u << TSL_PAD_Y;
+        TSL_GamepadProviderUpdate(provider, 1, &held);
+        IHS_HIDDeviceLock(device);
+        CHECK_EQ(device->cls->poll(device), 1);
+        IHS_HIDDeviceUnlock(device);
+        CHECK(TSL_GamepadProviderSetConnected(provider, 1, false, nullptr));
+        IHS_HIDDeviceLock(device);
+        CHECK_EQ(device->cls->poll(device), 1);
+        CHECK_EQ(device->cls->poll(device), 0);
+        IHS_HIDDeviceUnlock(device);
+
+        // IHS_HIDManagedDeviceClose would notify (and log through) a session, and this
+        // manager has none, so do its local half by hand.
+        device->cls->close(device);
+        managed->closed = true;
+        device->managed = nullptr;
+        device->cls->free(device);
+    }
+
+    IHS_HIDManagerDestroy(manager);
+    TSL_GamepadProviderDestroy(provider);
+}
+
+class NullSink : public tsl::MediaSink, public tsl::Session::Listener {
+public:
+    int VideoStart(const IHS_StreamVideoConfig &) override { return 0; }
+    IHS_StreamVideoSubmitResult VideoFrame(const uint8_t *, size_t, bool) override { return IHS_StreamVideoSubmitOK; }
+    void VideoStop() override {}
+    int AudioStart(const IHS_StreamAudioConfig &) override { return 0; }
+    int AudioPacket(const uint8_t *, size_t) override { return 0; }
+    void AudioStop() override {}
+};
+
+void TestSessionLifecycleWithoutConnect() {
+    uint8_t random[tsl::Identity::kRandomBytes] = {1};
+    tsl::Identity id = tsl::Identity::FromRandom(random, "test");
+    IHS_SessionInfo info{};
+    IHS_IPAddressFromString(&info.address.ip, "127.0.0.1");
+    info.address.port = 27031;
+    info.sessionKeyLen = 32;
+    NullSink sink;
+    {
+        tsl::HostKey key{};
+        tsl::Session session(id, key, info, tsl::SessionOptions{}, &sink, &sink);
+        TSL_GamepadInfo pad{};
+        session.SetGamepadConnected(0, true, &pad);
+        TSL_GamepadState state{};
+        session.UpdateGamepad(0, state);
+        CHECK(!session.connected());
+        session.SendKey(4, true);  // ignored while not connected
+    }
+    CHECK(true);
+}
+
+// A fake Steam host on localhost: answers one unicast discovery with a status message.
+class ProbeListener : public tsl::Client::Listener {
+public:
+    void OnHostFound(const tsl::Host &host) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        hosts.push_back(host);
+        cond.notify_all();
+    }
+    std::mutex mutex;
+    std::condition_variable cond;
+    std::vector<tsl::Host> hosts;
+};
+
+void TestProbeAgainstFakeHost() {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    CHECK_EQ(bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)), 0);
+    socklen_t len = sizeof(addr);
+    getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
+    uint16_t port = ntohs(addr.sin_port);
+    timeval tv{2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    uint8_t random[tsl::Identity::kRandomBytes] = {9, 9, 9};
+    tsl::Identity id = tsl::Identity::FromRandom(random, "probe-test");
+    ProbeListener listener;
+    tsl::Client client(id, &listener);
+
+    // The client's socket is created on its worker thread; retry until a send succeeds.
+    bool sent = false;
+    for (int i = 0; i < 50 && !sent; i++) {
+        sent = client.Probe("127.0.0.1", port);
+        if (!sent) usleep(20000);
+    }
+    CHECK(sent);
+    CHECK(!client.Probe("not-an-ip", port));
+
+    uint8_t packet[2048];
+    sockaddr_in from{};
+    socklen_t fromLen = sizeof(from);
+    ssize_t n = recvfrom(fd, packet, sizeof(packet), 0, reinterpret_cast<sockaddr *>(&from), &fromLen);
+    CHECK(n > 16);
+    if (n > 16) {
+        static const uint8_t magic[8] = {0xff, 0xff, 0xff, 0xff, 0x21, 0x4c, 0x5f, 0xa0};
+        CHECK(std::memcmp(packet, magic, 8) == 0);
+        uint32_t headerLen = packet[8] | (packet[9] << 8) | (packet[10] << 16) | (packet[11] << 24);
+        CMsgRemoteClientBroadcastHeader *header =
+                cmsg_remote_client_broadcast_header__unpack(nullptr, headerLen, packet + 12);
+        CHECK(header != nullptr);
+        if (header != nullptr) {
+            CHECK_EQ(header->msg_type, k_ERemoteClientBroadcastMsgDiscovery);
+            CHECK_EQ(header->client_id, id.deviceId);
+            cmsg_remote_client_broadcast_header__free_unpacked(header, nullptr);
+        }
+
+        // Reply the way Steam does: header + CMsgRemoteClientBroadcastStatus.
+        CMsgRemoteClientBroadcastHeader replyHeader = CMSG_REMOTE_CLIENT_BROADCAST_HEADER__INIT;
+        replyHeader.has_client_id = true;
+        replyHeader.client_id = 0x1122334455667788ULL;
+        replyHeader.has_msg_type = true;
+        replyHeader.msg_type = k_ERemoteClientBroadcastMsgStatus;
+        replyHeader.has_instance_id = true;
+        replyHeader.instance_id = 42;
+        CMsgRemoteClientBroadcastStatus status = CMSG_REMOTE_CLIENT_BROADCAST_STATUS__INIT;
+        char hostname[] = "fake-steam-host";
+        status.hostname = hostname;
+        status.has_ostype = true;
+        status.ostype = -184;
+        status.has_euniverse = true;
+        status.euniverse = 1;
+        status.has_games_running = true;
+        status.games_running = true;
+
+        std::vector<uint8_t> reply(magic, magic + 8);
+        auto appendLE32 = [&](uint32_t v) {
+            for (int i = 0; i < 4; i++) reply.push_back(static_cast<uint8_t>(v >> (8 * i)));
+        };
+        size_t hlen = cmsg_remote_client_broadcast_header__get_packed_size(&replyHeader);
+        appendLE32(static_cast<uint32_t>(hlen));
+        size_t off = reply.size();
+        reply.resize(off + hlen);
+        cmsg_remote_client_broadcast_header__pack(&replyHeader, reply.data() + off);
+        size_t blen = cmsg_remote_client_broadcast_status__get_packed_size(&status);
+        appendLE32(static_cast<uint32_t>(blen));
+        off = reply.size();
+        reply.resize(off + blen);
+        cmsg_remote_client_broadcast_status__pack(&status, reply.data() + off);
+        sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr *>(&from), fromLen);
+
+        std::unique_lock<std::mutex> lock(listener.mutex);
+        listener.cond.wait_for(lock, std::chrono::seconds(2), [&] { return !listener.hosts.empty(); });
+        CHECK_EQ(listener.hosts.size(), 1u);
+        if (!listener.hosts.empty()) {
+            const tsl::Host &host = listener.hosts[0];
+            CHECK_EQ(host.hostname(), "fake-steam-host");
+            CHECK_EQ(host.address(), "127.0.0.1");
+            CHECK_EQ(host.info.address.port, port);
+            CHECK_EQ(host.info.clientId, 0x1122334455667788ULL);
+            CHECK_EQ(host.info.instanceId, 42u);
+            CHECK(host.info.gamesRunning);
+        }
+    }
+    close(fd);
+}
+
+// Adds one packet to an ihslib packet window. fragments > 0 makes it the head of a frame
+// with that many fragment packets after it; fragment marks one of those.
+bool AddPacket(IHS_SessionPacketsWindow *window, uint16_t id, uint32_t millis, int16_t fragments = 0,
+               bool fragment = false) {
+    IHS_SessionPacket packet{};
+    packet.header.type = fragment ? IHS_SessionPacketTypeUnreliableFrag : IHS_SessionPacketTypeUnreliable;
+    packet.header.fragmentId = fragments;
+    packet.header.packetId = id;
+    packet.header.sendTimestamp = IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(millis);
+    IHS_BufferInit(&packet.body, 16, 64);
+    uint8_t byte = static_cast<uint8_t>(id);
+    IHS_BufferAppendMem(&packet.body, &byte, 1);
+    bool added = IHS_SessionPacketsWindowAdd(window, &packet);
+    IHS_BufferClear(&packet.body, true);
+    return added;
+}
+
+// Polls one frame; returns the packet id of its head, or -1.
+int PollFrame(IHS_SessionPacketsWindow *window) {
+    IHS_SessionFrame frame{};
+    IHS_BufferInit(&frame.body, 64, 1024);
+    int id = IHS_SessionPacketsWindowPoll(window, &frame) ? frame.header.packetId : -1;
+    IHS_SessionPacketsWindowReleaseFrame(&frame);
+    IHS_BufferClear(&frame.body, true);
+    return id;
+}
+
+void TestPacketWindowContiguousId() {
+    IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(16);
+    uint16_t id = 0;
+    CHECK(!IHS_SessionPacketsWindowContiguousId(window, &id));
+    CHECK(AddPacket(window, 10, 0));
+    CHECK(AddPacket(window, 11, 0));
+    CHECK(AddPacket(window, 13, 0));  // 12 lost
+    CHECK(AddPacket(window, 14, 0));
+    CHECK(IHS_SessionPacketsWindowContiguousId(window, &id));
+    CHECK_EQ(id, 11);  // what Steam may take as delivered
+    CHECK_EQ(PollFrame(window), 10);
+    CHECK_EQ(PollFrame(window), 11);
+    CHECK_EQ(PollFrame(window), -1);  // waits for 12
+    CHECK(IHS_SessionPacketsWindowContiguousId(window, &id));
+    CHECK_EQ(id, 11);
+    CHECK(AddPacket(window, 12, 0));  // the retransmission
+    CHECK(IHS_SessionPacketsWindowContiguousId(window, &id));
+    CHECK_EQ(id, 14);
+    CHECK_EQ(PollFrame(window), 12);
+    CHECK_EQ(PollFrame(window), 13);
+    CHECK_EQ(PollFrame(window), 14);
+    CHECK(IHS_SessionPacketsWindowContiguousId(window, &id));
+    CHECK_EQ(id, 14);
+    IHS_SessionPacketsWindowDestroy(window);
+}
+
+void TestPacketWindowFullIsNotEmpty() {
+    // Head away from slot 0, then fill: the window used to take the last slot and then read
+    // as empty, so nothing could be polled or discarded again.
+    IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(8);
+    for (uint16_t i = 0; i < 3; i++) CHECK(AddPacket(window, i, 0));
+    for (int i = 0; i < 3; i++) CHECK_EQ(PollFrame(window), i);
+    CHECK(AddPacket(window, 3, 0, 1));  // frame 3 lost its fragment (4): head stays here
+    int added = 0;
+    for (uint16_t i = 5; i < 20 && AddPacket(window, i, 0); i++) {
+        added++;
+        CHECK(IHS_SessionPacketsWindowSize(window) > 0);
+    }
+    CHECK_EQ(added, 5);  // 3, a free slot for 4, 5..9, and one slot kept free
+    CHECK_EQ(IHS_SessionPacketsWindowSize(window), 7);
+    IHS_SessionPacketsWindowDestroy(window);
+}
+
+void TestPacketWindowDiscardAndReset() {
+    IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(64);
+    const uint32_t discardDiff = IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(200);
+    // Frame 0 has two fragments; the second (2) is lost.
+    CHECK(AddPacket(window, 0, 0, 2));
+    CHECK(AddPacket(window, 1, 0, 0, true));
+    // Complete frames every 20 ms after it.
+    uint16_t next = 3;
+    for (uint32_t ms = 20; ms <= 160; ms += 20) CHECK(AddPacket(window, next++, ms));
+    CHECK_EQ(IHS_SessionPacketsWindowDiscard(window, discardDiff), 0);  // not stale yet
+    CHECK_EQ(PollFrame(window), -1);  // frame 0 blocks the rest
+    for (uint32_t ms = 180; ms <= 260; ms += 20) CHECK(AddPacket(window, next++, ms));
+    CHECK(IHS_SessionPacketsWindowDiscard(window, discardDiff) > 0);
+    int polled = PollFrame(window);
+    CHECK(polled > 0);  // frames after the broken one come through again
+    // Reset empties the window and lets it start over from any id.
+    IHS_SessionPacketsWindowReset(window);
+    uint16_t id = 0;
+    CHECK_EQ(IHS_SessionPacketsWindowSize(window), 0);
+    CHECK(!IHS_SessionPacketsWindowContiguousId(window, &id));
+    CHECK(AddPacket(window, 5000, 1000));
+    CHECK_EQ(PollFrame(window), 5000);
+    IHS_SessionPacketsWindowDestroy(window);
+}
+
+}  // namespace
+
+int main() {
+    tsl::SetLogLevel(IHS_LogLevelWarn);
+    IHS_Init();
+    TestIdentityRoundTrip();
+    TestPin();
+    TestKeymap();
+    TestGamepadMapping();
+    TestGamepadIds();
+    TestGamepadReportLayout();
+    TestGamepadProvider();
+    TestSessionLifecycleWithoutConnect();
+    TestProbeAgainstFakeHost();
+    TestPacketWindowContiguousId();
+    TestPacketWindowFullIsNotEmpty();
+    TestPacketWindowDiscardAndReset();
+    IHS_Quit();
+    std::printf("%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}

@@ -1,0 +1,5 @@
+/build/
+/out/
+*.wgt
+.cache/
+compile_commands.json

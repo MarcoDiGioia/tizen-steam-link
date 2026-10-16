@@ -1,0 +1,71 @@
+Serialize IHS_SessionChannelControlSend.
+
+The control channel's packet id and encryption sequence are plain counters. Input, HID
+reports, keepalives and stats are sent from different threads, so two messages could get
+the same id or sequence number and the host would drop one (a lost KeyUp is a stuck key).
+
+diff -ruN a/src/session/channels/ch_control.c b/src/session/channels/ch_control.c
+--- a/src/session/channels/ch_control.c	2026-10-05 08:00:52.000000000 -0500
++++ b/src/session/channels/ch_control.c	2026-10-15 19:18:42.301915314 -0500
+@@ -91,6 +91,7 @@
+             break;
+     }
+     IHS_SessionFrame frame;
++    IHS_MutexLock(control->sendLock);
+     IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, true, packetId);
+     IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u", value->name,
+                    frame.header.packetId);
+@@ -104,6 +105,7 @@
+                                     control->sendEncryptSequence++) != 0) {
+             free(serialized);
+             IHS_SessionFrameClear(&frame, true);
++            IHS_MutexUnlock(control->sendLock);
+             IHS_SessionLog(channel->session, IHS_LogLevelError, "Control", "Failed to encrypt payload\n");
+             IHS_SessionDisconnect(channel->session);
+             return false;
+@@ -114,6 +116,7 @@
+         IHS_BufferAppendMessage(&frame.body, message);
+     }
+     ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
++    IHS_MutexUnlock(control->sendLock);
+     IHS_SessionFrameClear(&frame, true);
+     return ret;
+ }
+@@ -139,11 +142,13 @@
+     IHS_UNUSED(data);
+     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
+     control->framePacketWindow = IHS_SessionPacketsWindowCreate(128);
++    control->sendLock = IHS_MutexCreate();
+ }
+ 
+ static void OnControlDeinit(IHS_SessionChannel *channel) {
+     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
+     IHS_SessionPacketsWindowDestroy(control->framePacketWindow);
++    IHS_MutexDestroy(control->sendLock);
+ }
+ 
+ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
+diff -ruN a/src/session/channels/ch_control.h b/src/session/channels/ch_control.h
+--- a/src/session/channels/ch_control.h	2026-10-05 08:00:52.000000000 -0500
++++ b/src/session/channels/ch_control.h	2026-10-15 19:18:42.301637315 -0500
+@@ -30,6 +30,7 @@
+ #include "session/frame.h"
+ #include "session/window.h"
+ #include "ihs_timer.h"
++#include "ihs_thread.h"
+ 
+ #include "protobuf/remoteplay.pb-c.h"
+ #include "protobuf/hiddevices.pb-c.h"
+@@ -40,6 +41,12 @@
+     uint64_t recvEncryptSequence;
+     IHS_SessionPacketsWindow *framePacketWindow;
+     IHS_TimerTask *keepAliveTimer;
++    /**
++     * Serializes IHS_SessionChannelControlSend: the packet id and the encryption sequence are
++     * plain counters, and input, HID reports, keepalives and stats are sent from different
++     * threads.
++     */
++    IHS_Mutex *sendLock;
+ } IHS_SessionChannelControl;
+ 
+ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets"
+        id="http://tsl.local/TizenSteamLink" version="0.1.0" viewmodes="maximized">
+    <tizen:application id="TSLinkTV01.TizenSteamLink" package="TSLinkTV01" required_version="5.5"/>
+    <content src="index.html"/>
+    <name>Tizen Steam Link</name>
+    <description>Unofficial Steam Remote Play client. Not affiliated with Valve.</description>
+    <icon src="icon.png"/>
+    <access origin="*" subdomains="true"/>
+    <feature name="http://tizen.org/feature/screen.size.all"/>
+    <tizen:privilege name="http://tizen.org/privilege/internet"/>
+    <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+    <tizen:privilege name="http://tizen.org/privilege/fullscreen"/>
+    <tizen:metadata key="http://samsung.com/tv/metadata/use.voiceguide" value="false"/>
+    <tizen:metadata key="http://samsung.com/tv/metadata/floating.navigation" value="false"/>
+    <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="disable"
+                   encryption="disable" install-location="auto" hwkey-event="enable"
+                   pointing-device-support="enable"/>
+</widget>
