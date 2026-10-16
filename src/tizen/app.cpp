@@ -139,7 +139,7 @@ struct StreamParams {
 
 class App : public Client::Listener, public Session::Listener {
 public:
-    App() : player_("tsl-video") {}
+    explicit App(samsung::wasm::EmssLatencyMode latency) : player_("tsl-video", latency) {}
 
     ~App() override {
         polling_ = false;
@@ -276,7 +276,11 @@ public:
                std::to_string(s.videoPacketsLost) + ",\"lostReports\":" + std::to_string(s.lostReports) +
                ",\"roundTripMs\":" + std::to_string(s.roundTripMs) + ",\"fec\":" + (s.fec ? "true" : "false") +
                ",\"fecRecovered\":" + std::to_string(s.fecRecovered) + ",\"fecUnrecoverable\":" +
-               std::to_string(s.fecUnrecoverable) + "}";
+               std::to_string(s.fecUnrecoverable) + ",\"videoSessionChanges\":" +
+               std::to_string(c.videoSessionChanges) + ",\"videoTrackCloses\":" + std::to_string(c.videoTrackCloses) +
+               ",\"lastCloseReason\":" + std::to_string(c.lastCloseReason) + ",\"lastAppendError\":" +
+               std::to_string(c.lastAppendError) + ",\"pipelineErrors\":" + std::to_string(c.pipelineErrors) +
+               ",\"lastPipelineError\":" + std::to_string(c.lastPipelineError) + "}";
     }
 
     // Client::Listener (ihslib client thread)
@@ -576,7 +580,21 @@ int main() {
     tsl::SetLogSink(tsl::LogToConsole);
     tsl::SetLogLevel(IHS_LogLevelInfo);
     IHS_Init();
-    tsl::g_app = new tsl::App();
+    // The player's latency mode is fixed when it is created, before the stream's codec is known,
+    // so it follows the codec setting (the page reloads after every stream and when that
+    // setting changes). Ultra low latency is the TV's game mode, the lowest latency, but on a
+    // Samsung M7 smart monitor (Tizen 9) it decoded HEVC without ever showing a frame past the
+    // first; low latency shows it.
+    bool hevc = EM_ASM_INT({
+        try {
+            return JSON.parse(localStorage.getItem('tsl.settings') || '{}').hevc ? 1 : 0;
+        } catch (e) {
+            return 0;
+        }
+    });
+    tsl::Log(IHS_LogLevelInfo, "Player", "%s latency mode (codec setting %s)", hevc ? "Low" : "Ultra low",
+             hevc ? "HEVC" : "H.264");
+    tsl::g_app = new tsl::App(hevc ? samsung::wasm::EmssLatencyMode::kLow : samsung::wasm::EmssLatencyMode::kUltraLow);
     EM_ASM({
         if (typeof window.tslReady === 'function') window.tslReady();
     });

@@ -37,10 +37,18 @@ public:
         uint64_t audioFailed = 0;
         uint64_t silenceFilled = 0;
         uint64_t audioDropped = 0;
+        // Diagnostics: what the platform player reported.
+        uint64_t videoSessionChanges = 0;
+        uint64_t videoTrackCloses = 0;
+        int lastCloseReason = -1;
+        int lastAppendError = 0;
+        uint64_t pipelineErrors = 0;
+        int lastPipelineError = -1;
     };
 
     // Must be constructed on the browser main thread. videoElementId names a <video>.
-    explicit Player(const char *videoElementId);
+    // latency is fixed for the page's lifetime: Samsung's player takes it at construction.
+    Player(const char *videoElementId, samsung::wasm::EmssLatencyMode latency);
     ~Player() override;
 
     void SetHevcSupported(bool supported) { hevc_ = supported; }
@@ -126,6 +134,8 @@ private:
 
     std::atomic<uint64_t> videoAppended_{0}, videoFailed_{0}, audioAppended_{0}, audioFailed_{0}, silence_{0},
             audioDropped_{0};
+    std::atomic<uint64_t> videoSessionChanges_{0}, videoTrackCloses_{0}, pipelineErrors_{0};
+    std::atomic<int> lastCloseReason_{-1}, lastAppendError_{0}, lastPipelineError_{-1};
 };
 
 }  // namespace tsl

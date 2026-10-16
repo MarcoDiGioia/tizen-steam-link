@@ -20,8 +20,13 @@ constexpr int kMaxOpusSamples = 5760;
 // If no audio arrived for this long while video plays, feed silence so the media
 // element doesn't stall video waiting for audio.
 constexpr auto kAudioStarvation = 100ms;
-const Player::Seconds kAudioMaxBehind(0.2);
-const Player::Seconds kAudioMaxAhead(0.15);
+// How far audio timestamps may drift from the wall clock before they are pulled back (behind)
+// or packets dropped (ahead). In the low latency modes the player's clock follows the
+// timestamps appended, so audio running ahead made video frames count as late: with 150 ms
+// ahead allowed, an HEVC stream on a Samsung monitor dropped about 100 frames at the start,
+// with 40 ms about 20, and nothing audible changed.
+const Player::Seconds kAudioMaxBehind(0.04);
+const Player::Seconds kAudioMaxAhead(0.04);
 constexpr auto kOpenTimeout = 5000ms;
 
 const char *VideoMime(const IHS_StreamVideoConfig &config) {
@@ -41,10 +46,9 @@ const char *VideoMime(const IHS_StreamVideoConfig &config) {
 
 }  // namespace
 
-Player::Player(const char *videoElementId)
+Player::Player(const char *videoElementId, samsung::wasm::EmssLatencyMode latency)
     : element_(videoElementId),
-      source_(samsung::wasm::ElementaryMediaStreamSource::LatencyMode::kUltraLow,
-              samsung::wasm::ElementaryMediaStreamSource::RenderingMode::kMediaElement),
+      source_(latency, samsung::wasm::ElementaryMediaStreamSource::RenderingMode::kMediaElement),
       sourceListener_(this),
       videoListener_(this, true),
       audioListener_(this, false) {
@@ -74,11 +78,14 @@ void Player::SourceListener::OnSourceOpen() {
 }
 
 void Player::SourceListener::OnPipelineError(samsung::wasm::MediaPipelineError error, const char *message) {
+    player_->pipelineErrors_++;
+    player_->lastPipelineError_ = static_cast<int>(error);
     Log(IHS_LogLevelError, "Player", "Media pipeline error %d: %s", static_cast<int>(error),
         message != nullptr ? message : "");
 }
 
 void Player::TrackListener::OnAppendError(samsung::wasm::OperationResult result) {
+    if (video_) player_->lastAppendError_ = static_cast<int>(result);
     Log(IHS_LogLevelWarn, "Player", "%s append error %d", video_ ? "Video" : "Audio", static_cast<int>(result));
 }
 
@@ -88,7 +95,12 @@ void Player::TrackListener::OnTrackOpen() {
     player_->changed_.notify_all();
 }
 
-void Player::TrackListener::OnTrackClosed(samsung::wasm::ElementaryMediaTrack::CloseReason) {
+void Player::TrackListener::OnTrackClosed(samsung::wasm::ElementaryMediaTrack::CloseReason reason) {
+    Log(IHS_LogLevelInfo, "Player", "%s track closed, reason %d", video_ ? "Video" : "Audio", static_cast<int>(reason));
+    if (video_) {
+        player_->videoTrackCloses_++;
+        player_->lastCloseReason_ = static_cast<int>(reason);
+    }
     std::lock_guard<std::mutex> lock(player_->mutex_);
     (video_ ? player_->videoOpen_ : player_->audioOpen_) = false;
     if (video_) {
@@ -100,6 +112,8 @@ void Player::TrackListener::OnTrackClosed(samsung::wasm::ElementaryMediaTrack::C
 
 void Player::TrackListener::OnSessionIdChanged(samsung::wasm::SessionId sessionId) {
     (video_ ? player_->videoSession_ : player_->audioSession_) = sessionId;
+    Log(IHS_LogLevelInfo, "Player", "%s session id %u", video_ ? "Video" : "Audio", static_cast<unsigned>(sessionId));
+    if (video_) player_->videoSessionChanges_++;
     // A new track session starts over: the decoder needs a keyframe first.
     if (video_) {
         std::lock_guard<std::mutex> lock(player_->mutex_);
@@ -238,8 +252,14 @@ IHS_StreamVideoSubmitResult Player::VideoFrame(const uint8_t *data, size_t len, 
             1,
             videoSession_.load(),
     };
-    if (!videoTrack_.AppendPacket(packet)) {
-        videoFailed_++;
+    auto appended = videoTrack_.AppendPacket(packet);
+    if (!appended) {
+        uint64_t failed = ++videoFailed_;
+        lastAppendError_ = static_cast<int>(appended.operation_result);
+        if (failed <= 5) {
+            Log(IHS_LogLevelWarn, "Player", "Video append failed: result %d (%s frame of %zu bytes)",
+                static_cast<int>(appended.operation_result), keyframe ? "key" : "delta", len);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         waitKeyframe_ = true;
         lostReported_ = true;
@@ -352,6 +372,12 @@ Player::Counters Player::counters() const {
     c.audioFailed = audioFailed_.load();
     c.silenceFilled = silence_.load();
     c.audioDropped = audioDropped_.load();
+    c.videoSessionChanges = videoSessionChanges_.load();
+    c.videoTrackCloses = videoTrackCloses_.load();
+    c.lastCloseReason = lastCloseReason_.load();
+    c.lastAppendError = lastAppendError_.load();
+    c.pipelineErrors = pipelineErrors_.load();
+    c.lastPipelineError = lastPipelineError_.load();
     return c;
 }
 

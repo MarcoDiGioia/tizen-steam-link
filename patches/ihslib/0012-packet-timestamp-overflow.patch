@@ -1,0 +1,26 @@
+Compute session packet timestamps in 64 bits.
+
+IHS_SessionPacketTimestamp multiplied tv_nsec by 65536 before widening the result. Where long
+is 32 bits, as in WebAssembly, the product overflows for most of every second, so the
+sub-second part of every timestamp was garbage: in the packets sent to Steam, in ACKs, and in
+the round trip measured from them (a TV showed 14464000 ms). IHS_TimerNow already widens
+before multiplying; this does the same.
+
+diff --git a/src/session/packet.c b/src/session/packet.c
+index f2fd260..64984a9 100644
+--- a/src/session/packet.c
++++ b/src/session/packet.c
+@@ -134,7 +134,9 @@ void IHS_SessionPacketClear(IHS_SessionPacket *packet, bool freeData) {
+ uint32_t IHS_SessionPacketTimestamp() {
+     struct timespec tp;
+     clock_gettime(CLOCK_MONOTONIC, &tp);
+-    uint64_t nsec = tp.tv_nsec * 65536 / 1000000000;
+-    uint32_t sec = tp.tv_sec * 65536;
+-    return sec + nsec;
++    // Widen before multiplying: where long is 32 bits (WebAssembly), tv_nsec * 65536 overflows
++    // and the sub-second part came out as garbage. IHS_TimerNow had the same fix.
++    uint64_t nsec = (uint64_t) tp.tv_nsec * 65536 / 1000000000;
++    uint32_t sec = (uint32_t) ((uint64_t) tp.tv_sec * 65536);
++    return sec + (uint32_t) nsec;
+ }
+\ No newline at end of file

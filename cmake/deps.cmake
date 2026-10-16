@@ -15,9 +15,10 @@ endif ()
 # patches/ihslib: two threading fixes, a callback signature fix that only matters on
 # Emscripten (the timer thread), fixes for packet loss (cumulative ACKs on the control
 # channel, data channels getting past a lost packet, skipping a lost frame at once), stream
-# statistics, video FEC, the quality and bitrate settings, and the codecs and resolution the
-# client asks for; each patch starts with a description. (0003, logging for the pairing
-# request, was dropped once pairing worked on the TV.)
+# statistics, video FEC, the quality and bitrate settings, the codecs and resolution the
+# client asks for, and 64-bit packet timestamps (they overflowed on WebAssembly); each patch
+# starts with a description. (0003, logging for the pairing request, was dropped once
+# pairing worked on the TV.)
 set(TSL_IHSLIB_PATCHES ${CMAKE_CURRENT_LIST_DIR}/../patches/ihslib)
 FetchContent_Declare(ihslib
         URL https://github.com/mariotaku/ihslib/archive/f68de5f07e0c27ccea9f47f9f5e38fd92c99919e.tar.gz
@@ -32,6 +33,7 @@ FetchContent_Declare(ihslib
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0009-unreliable-fec.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0010-quality-and-bitrate.patch
               COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0011-client-video-caps.patch
+              COMMAND patch -p1 --forward -i ${TSL_IHSLIB_PATCHES}/0012-packet-timestamp-overflow.patch
         SOURCE_SUBDIR no-cmake)
 
 # protobuf-c runtime only; the generated .pb-c.c files ship with ihslib.

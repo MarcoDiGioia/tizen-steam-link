@@ -632,8 +632,14 @@
     function openSettings() {
         renderSettings();
         var dlg = $('#dialog-settings');
+        var hevcAtOpen = state.settings.hevc;
         openDialog(dlg, $('#settings-list li'), function (action, el) {
-            if (action === 'close' || action === 'cancel') return closeDialog();
+            if (action === 'close' || action === 'cancel') {
+                closeDialog();
+                // The module picks the player's latency mode from the codec at page load.
+                if (state.settings.hevc !== hevcAtOpen) location.reload();
+                return;
+            }
             if (el && el.hasAttribute('data-key')) changeSetting(el, 1);
         });
     }
@@ -717,6 +723,21 @@
             'round trip ' + (st.roundTripMs > 0 ? st.roundTripMs.toFixed(1) + ' ms' : 'not measured yet');
     }
 
+    // What the TV's player does with the frames: appended, decoded, shown.
+    function playerStats(st) {
+        var v = $('#tsl-video');
+        var q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+        var decoded = q ? q.totalVideoFrames : v.webkitDecodedFrameCount;
+        var dropped = q ? q.droppedVideoFrames : v.webkitDroppedFrameCount;
+        return 'player: appended ' + (st.videoAppended || 0) + ', decoded ' + (decoded === undefined ? '?' : decoded) +
+            ', dropped ' + (dropped === undefined ? '?' : dropped) + ', time ' + v.currentTime.toFixed(1) +
+            ', ready ' + v.readyState + '\n' +
+            'sessions ' + (st.videoSessionChanges || 0) + ', closes ' + (st.videoTrackCloses || 0) +
+            (st.lastCloseReason >= 0 ? ' (reason ' + st.lastCloseReason + ')' : '') +
+            ', append error ' + (st.lastAppendError || 0) + ', pipeline errors ' + (st.pipelineErrors || 0) +
+            (st.lastPipelineError >= 0 ? ' (' + st.lastPipelineError + ')' : '');
+    }
+
     function updateStats() {
         var s = state.stream;
         if (!s || !mod) return;
@@ -737,7 +758,7 @@
                 'target ' + (st.targetBitrate / 1e6).toFixed(1) + ' Mbit/s' +
                 (st.framerateDen ? ' @ ' + (st.framerateNum / st.framerateDen).toFixed(0) + ' fps' : '') + '\n' +
                 'keyframes ' + st.keyFrames + '   failed appends ' + (st.videoFailed + st.audioFailed) + '\n' +
-                networkStats(st, s.last);
+                networkStats(st, s.last) + '\n' + playerStats(st);
         }
         s.last = {time: now, videoFrames: st.videoFrames, videoBytes: st.videoBytes,
             videoPackets: st.videoPackets || 0, videoPacketsLost: st.videoPacketsLost || 0};
