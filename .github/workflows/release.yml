@@ -1,0 +1,101 @@
+name: Release
+
+# Every push to master, which normally means merging develop into it, is a
+# new version: tested, built, tagged and published with the TV package and
+# tsl-cli.
+#
+# The version lives in the tags. The first release uses the one in
+# CMakeLists.txt; after that, the commits since the last tag decide the next
+# one (see .github/scripts/next-version). CI writes it into CMakeLists.txt and
+# web/config.xml only for the build, so the app reports it, and never commits
+# back.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The whole history with tags, to find the last version.
+          fetch-depth: 0
+
+      - name: Work out the version
+        id: version
+        run: |
+          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          if [ -z "$last" ]; then
+            version=$(sed -n 's/^project(tizen-steam-link VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          else
+            version=$(git log --format='%s%n%b' "$last..HEAD" | bash .github/scripts/next-version "$last")
+          fi
+          echo "Releasing $version, after ${last:-nothing}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Stamp the version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i "s/^project(tizen-steam-link VERSION [0-9.]*/project(tizen-steam-link VERSION $VERSION/" CMakeLists.txt
+          sed -i "s/ version=\"[0-9.]*\" viewmodes=/ version=\"$VERSION\" viewmodes=/" web/config.xml
+          grep -q "VERSION $VERSION " CMakeLists.txt
+          grep -q "version=\"$VERSION\"" web/config.xml
+
+      - name: Test
+        run: BUILD_TYPE=Release scripts/build-desktop.sh
+
+      # The toolchain image (Tizen Studio and Samsung's Emscripten, about 2 GB)
+      # comes from the Actions cache when the Dockerfile hasn't changed. Its
+      # user takes the runner's ids, so the build can write to the checkout.
+      - name: Runner user
+        id: user
+        run: |
+          echo "uid=$(id -u)" >> "$GITHUB_OUTPUT"
+          echo "gid=$(id -g)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          load: true
+          tags: tizen-steam-link-toolchain
+          build-args: |
+            UID=${{ steps.user.outputs.uid }}
+            GID=${{ steps.user.outputs.gid }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build the TV app
+        run: scripts/build-tizen.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          wgt="TizenSteamLink-$VERSION.wgt"
+          cli="tsl-cli-$VERSION-x86_64-linux"
+          cp out/TizenSteamLink.wgt "$wgt"
+          cp build/desktop/src/desktop/tsl-cli "$cli"
+          sha256sum "$wgt" > "$wgt.sha256"
+          sha256sum "$cli" > "$cli.sha256"
+          gh release create "v$VERSION" "$wgt" "$wgt.sha256" "$cli" "$cli.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --generate-notes

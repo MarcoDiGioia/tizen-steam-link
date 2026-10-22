@@ -25,12 +25,12 @@ This project is not affiliated with or endorsed by Valve.
 These are the main steps. [docs/install.md](docs/install.md) goes through each one, and
 what to do when one fails.
 
-1. Build the app with `scripts/build-tizen.sh` (it needs Docker). That gives you
-   `out/TizenSteamLink.wgt`.
+1. Download `TizenSteamLink-<version>.wgt` from the
+   [latest release](https://github.com/pebeto/tizen-steam-link/releases/latest).
 2. Turn on Developer Mode on the TV: open Apps, type `1 2 3 4 5` with the remote, switch it
    on, and enter the IP address of the computer you install from. Then hold the power button
    until the TV restarts.
-3. In Apps2Samsung, pick "Custom WGT File", choose `TizenSteamLink.wgt` and install it. On
+3. In Apps2Samsung, pick "Custom WGT File", choose the `.wgt` file and install it. On
    Tizen 7 and later, sign in with a Samsung account when asked, so Apps2Samsung can sign the
    app for your TV.
 4. If the computer with Steam has a firewall, let the TV in: UDP ports 27031 to 27036 and TCP
@@ -125,8 +125,8 @@ safer choice on Wi-Fi.
 - [docs/install.md](docs/install.md): installing step by step, and fixing a failed install.
 - [docs/how-it-works.md](docs/how-it-works.md): how the app streams, and how it copes with
   lost packets.
-- [docs/development.md](docs/development.md): building, testing, the desktop client
-  `tsl-cli`, and debugging on the TV.
+- [docs/development.md](docs/development.md): building, testing, releases, the desktop
+  client `tsl-cli`, and debugging on the TV.
 
 ## License
 

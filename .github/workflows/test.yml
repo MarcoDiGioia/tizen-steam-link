@@ -1,0 +1,49 @@
+name: Test
+
+# Every push outside master (develop and feature branches) and every pull
+# request: the unit tests, as built for a release and again under
+# AddressSanitizer and UndefinedBehaviorSanitizer. A push to master runs the
+# release workflow instead, which tests before it builds.
+on:
+  push:
+    branches-ignore: [master]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Build and test
+        run: BUILD_TYPE=Release scripts/build-desktop.sh
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Build with ASan and UBSan
+        run: |
+          flags="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake -S . -B build/asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" \
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build/asan
+
+      # Any finding fails the job: a use-after-free or a leak from ASan, or
+      # undefined behavior from UBSan, which otherwise only prints it.
+      - name: Test
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: build/asan/tests/test-core

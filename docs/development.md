@@ -50,6 +50,29 @@ ninja -C build/asan && build/asan/tests/test-core
 ThreadSanitizer works the same way with `-fsanitize=thread` in `build/tsan`. It reports races
 on the interrupt flags in ihslib's `base.c` and `ch_data.c`, which come from upstream.
 
+## CI and releases
+
+Day-to-day work goes to `develop`, and `master` gets a new version each time `develop` is
+merged into it. Two GitHub Actions workflows run on top:
+
+- `.github/workflows/test.yml` runs on every push outside `master` and on every pull request.
+  It builds and runs the unit tests in a Release build, and again under AddressSanitizer and
+  UndefinedBehaviorSanitizer. Any sanitizer finding fails the job.
+- `.github/workflows/release.yml` runs on every push to `master`. Each push becomes a new
+  version, in four steps:
+  1. It works out the version. The first release uses the one in `CMakeLists.txt` (0.1.0).
+     After that, the commit messages since the last tag decide, following Conventional
+     Commits (see `.github/scripts/next-version`). A `!` after the type, as in `feat!: ...`,
+     or a `BREAKING CHANGE:` line bumps the major version. `feat: ...` bumps the minor one.
+     Anything else bumps the patch.
+  2. It writes the version into `CMakeLists.txt` and `web/config.xml` for the build only, so
+     the app shows it in its footer. Nothing is committed back.
+  3. It runs the tests and builds the TV package. The toolchain image comes from the Actions
+     cache unless `docker/Dockerfile` changed.
+  4. It tags the commit `vX.Y.Z` and publishes a GitHub release with
+     `TizenSteamLink-X.Y.Z.wgt`, `tsl-cli-X.Y.Z-x86_64-linux`, a `.sha256` file for each,
+     and notes generated from the commits.
+
 ## The interface in a browser
 
 ```sh

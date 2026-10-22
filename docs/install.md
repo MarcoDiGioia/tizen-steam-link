@@ -10,14 +10,16 @@ network, with the TV in Developer Mode.
 
 ## 1. Get the app package
 
-Build it from this repository. You need Docker:
+Download `TizenSteamLink-<version>.wgt` from the
+[latest release](https://github.com/pebeto/tizen-steam-link/releases/latest). Each file there
+comes with a `.sha256` file, so you can check the download:
 
 ```sh
-scripts/build-tizen.sh
+sha256sum -c TizenSteamLink-<version>.wgt.sha256
 ```
 
-The package lands in `out/TizenSteamLink.wgt`. The first build also sets up a toolchain image
-of about 2 GB, which later builds reuse. [development.md](development.md) has the details.
+You can also build the package yourself with `scripts/build-tizen.sh`, which needs Docker. It
+writes `out/TizenSteamLink.wgt`. [development.md](development.md) has the details.
 
 ## 2. Prepare the computer that runs Steam
 
@@ -55,10 +57,10 @@ Steam's suggestion is to start it as `steam -pipewire`.
 2. Start it. It finds the TV on the network, or you type in the TV's IP address.
 3. Keep the default certificate. TVs on Tizen 7 or later only run apps signed for that TV, so
    Apps2Samsung asks you to sign in with a Samsung account and signs the package for you.
-4. Pick "Custom WGT File", choose `out/TizenSteamLink.wgt`, then install it.
+4. Pick "Custom WGT File", choose the `.wgt` file from step 1, then install it.
 5. Tizen Steam Link shows up under Apps.
 
-To update the app later, build the new package and install it the same way.
+To update the app later, download the new package and install it the same way.
 
 ## 5. Pair and stream
 
