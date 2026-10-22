@@ -11,6 +11,9 @@
     <tizen:privilege name="http://tizen.org/privilege/internet"/>
     <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
     <tizen:privilege name="http://tizen.org/privilege/fullscreen"/>
+    <!-- Game Mode for the whole app. Tizen 9 no longer turns it on for the player's ultra low
+         latency mode, which older versions did; 2022 and later TVs read this key. -->
+    <tizen:metadata key="http://samsung.com/tv/metadata/use.game.mode" value="true"/>
     <tizen:metadata key="http://samsung.com/tv/metadata/use.voiceguide" value="false"/>
     <tizen:metadata key="http://samsung.com/tv/metadata/floating.navigation" value="false"/>
     <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="disable"

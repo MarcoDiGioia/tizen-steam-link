@@ -7,8 +7,8 @@ uses Steam Remote Play, the same protocol as Valve's own Steam Link app.
 ![The computer list on the TV](docs/images/home.png)
 
 The app finds the computers running Steam on your network and pairs with each one through a
-PIN. It streams with the TV's hardware video decoder. Controllers, keyboards and mice plugged
-into the TV go through to the computer.
+PIN. It streams with the TV's hardware video decoder, and asks the TV for Game Mode to keep the
+delay down. Controllers, keyboards and mice plugged into the TV go through to the computer.
 
 This project is not affiliated with or endorsed by Valve.
 

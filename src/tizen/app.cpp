@@ -623,11 +623,15 @@ int main() {
     tsl::SetLogSink(tsl::LogToConsole);
     tsl::SetLogLevel(IHS_LogLevelInfo);
     IHS_Init();
-    // The player's latency mode is fixed when it is created, before the stream's codec is known,
-    // so it follows the codec setting (the page reloads after every stream and when that
-    // setting changes). Ultra low latency is the TV's game mode, the lowest latency, but on a
-    // Samsung M7 smart monitor (Tizen 9) it decoded HEVC without ever showing a frame past the
-    // first; low latency shows it.
+    // The player's latency mode is fixed when it is created, before the stream's codec is known
+    // (the page reloads after every stream and when the codec setting changes).
+    //
+    // Up to Tizen 8, ultra low latency is the lowest latency and switches the TV to Game Mode.
+    // Tizen 9 changed Game Mode for WebAssembly apps: ultra low latency no longer switches it on,
+    // and on a Samsung M7 smart monitor (Tizen 9) it decoded HEVC without showing a frame past
+    // the first, and dropped about 17% of H.264 frames. So Tizen 9 and later get low latency,
+    // and Game Mode comes from the use.game.mode metadata in config.xml instead, as in Moonlight
+    // for Tizen. HEVC gets low latency on every version, since nothing older was tried with it.
     bool hevc = EM_ASM_INT({
         try {
             return JSON.parse(localStorage.getItem('tsl.settings') || '{}').hevc ? 1 : 0;
@@ -635,10 +639,18 @@ int main() {
             return 0;
         }
     });
+    // The major platform version, 9 for "9.0"; 0 outside a TV.
+    int tizenVersion = EM_ASM_INT({
+        try {
+            return parseInt(tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'), 10) || 0;
+        } catch (e) {
+            return 0;
+        }
+    });
     // Older TVs may lack the ultra low latency mode altogether.
-    bool ultraLow = !hevc && samsung::wasm::EmssVersionInfo::Create().has_ultra_low_latency;
-    tsl::Log(IHS_LogLevelInfo, "Player", "%s latency mode (codec setting %s%s)", ultraLow ? "Ultra low" : "Low",
-             hevc ? "HEVC" : "H.264", !hevc && !ultraLow ? ", no ultra low latency mode on this TV" : "");
+    bool ultraLow = tizenVersion < 9 && !hevc && samsung::wasm::EmssVersionInfo::Create().has_ultra_low_latency;
+    tsl::Log(IHS_LogLevelInfo, "Player", "%s latency mode (Tizen %d, codec setting %s)", ultraLow ? "Ultra low" : "Low",
+             tizenVersion, hevc ? "HEVC" : "H.264");
     tsl::g_app = new tsl::App(ultraLow ? samsung::wasm::EmssLatencyMode::kUltraLow : samsung::wasm::EmssLatencyMode::kLow);
     EM_ASM({
         if (typeof window.tslReady === 'function') window.tslReady();

@@ -66,11 +66,18 @@ with a simulated computer.
 
 ## The TV's player
 
-Samsung's player has latency modes, and the app picks one when the page loads:
+The app asks the TV for Game Mode, which turns off the TV's picture processing and its delay.
+It does that with the `use.game.mode` key in `config.xml`, which TVs from 2022 on read, as
+Moonlight for Tizen does.
 
-- With H.264 it uses the ultra low latency mode, which is the TV's game mode.
-- With HEVC it uses the low latency mode. On a Samsung smart monitor, game mode decoded HEVC
-  but never showed a frame after the first one.
+Samsung's player also has latency modes, and the app picks one when the page loads:
+
+- On Tizen 9 and later it uses the low latency mode. Tizen 9 changed Game Mode for apps like
+  this one: the ultra low latency mode no longer switches the TV to it. On a Samsung smart
+  monitor on Tizen 9, the ultra low latency mode also showed HEVC frozen on its first frame and
+  dropped about 17% of H.264 frames.
+- On older versions it uses the ultra low latency mode for H.264, which also switches the TV
+  to Game Mode there, and the low latency mode for HEVC.
 - TVs without the ultra low latency mode use the low latency mode for both.
 
 The player takes its mode when it starts, so the page reloads when the codec setting changes.
