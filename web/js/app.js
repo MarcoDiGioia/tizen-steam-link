@@ -808,7 +808,7 @@
             var mbps = (st.videoBytes - s.last.videoBytes) * 8 / dt / 1e6;
             text = st.width + 'x' + st.height + ' ' + (st.videoCodec === 5 ? 'HEVC' : 'H.264') + '\n' +
                 fps.toFixed(0) + ' fps   ' + mbps.toFixed(1) + ' Mbit/s\n' +
-                'target ' + (st.targetBitrate / 1e6).toFixed(1) + ' Mbit/s' +
+                'target ' + (st.targetBitrate / 1000).toFixed(1) + ' Mbit/s' +  // Steam sends kbit/s
                 (st.framerateDen ? ' @ ' + (st.framerateNum / st.framerateDen).toFixed(0) + ' fps' : '') + '\n' +
                 'keyframes ' + st.keyFrames + '   failed appends ' + (st.videoFailed + st.audioFailed) + '\n' +
                 networkStats(st, s.last) + '\n' + playerStats(st);

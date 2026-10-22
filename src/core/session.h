@@ -58,7 +58,7 @@ struct SessionStats {
     uint32_t height = 0;
     IHS_StreamVideoCodec videoCodec = IHS_StreamVideoCodecNone;
     IHS_StreamAudioCodec audioCodec = IHS_StreamAudioCodecNone;
-    int32_t targetBitrate = 0;
+    int32_t targetBitrate = 0;  // kbit/s, as Steam sends it
     uint32_t framerateNum = 0;
     uint32_t framerateDen = 0;
     // Network, from ihslib (IHS_SessionStreamStats).
