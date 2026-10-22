@@ -727,8 +727,10 @@ body.streaming .topbar, body.streaming .footer {
     }
 }
 
+/* At the bottom: the statistics panel takes the top left, and grows wide enough to reach the
+   middle. 32 px keeps it clear of the toasts, which sit 104 px up. */
 .overlay.notice {
-    top: 48px;
+    bottom: 32px;
     left: 50%;
     display: flex;
     align-items: center;

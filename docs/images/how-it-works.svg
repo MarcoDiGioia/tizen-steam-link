@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 480" width="1000" height="480"
+     font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#1a9fff"/>
+    </marker>
+    <marker id="small" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="480" rx="16" fill="#f6f8fa"/>
+
+  <!-- The computer -->
+  <rect x="30" y="60" width="260" height="370" rx="12" fill="#ffffff" stroke="#c5ced8" stroke-width="2"/>
+  <text x="160" y="98" text-anchor="middle" font-size="20" font-weight="700" fill="#1b2838">Your computer</text>
+  <text x="160" y="122" text-anchor="middle" font-size="14" fill="#57606a">A PC or a Steam Deck with Steam</text>
+
+  <rect x="50" y="150" width="220" height="68" rx="8" fill="#e8f3ff" stroke="#1a9fff"/>
+  <text x="160" y="178" text-anchor="middle" font-size="15" font-weight="600" fill="#1b2838">Captures the screen</text>
+  <text x="160" y="200" text-anchor="middle" font-size="13" fill="#3d4a57">and encodes H.264 or HEVC</text>
+
+  <rect x="50" y="234" width="220" height="68" rx="8" fill="#e8f3ff" stroke="#1a9fff"/>
+  <text x="160" y="262" text-anchor="middle" font-size="15" font-weight="600" fill="#1b2838">Records the sound</text>
+  <text x="160" y="284" text-anchor="middle" font-size="13" fill="#3d4a57">and encodes it as Opus</text>
+
+  <rect x="50" y="318" width="220" height="68" rx="8" fill="#e8f3ff" stroke="#1a9fff"/>
+  <text x="160" y="346" text-anchor="middle" font-size="15" font-weight="600" fill="#1b2838">Takes your input</text>
+  <text x="160" y="368" text-anchor="middle" font-size="13" fill="#3d4a57">as a gamepad, keyboard, mouse</text>
+
+  <!-- The network -->
+  <text x="434" y="98" text-anchor="middle" font-size="18" font-weight="700" fill="#1b2838">Your network</text>
+  <text x="434" y="122" text-anchor="middle" font-size="14" fill="#57606a">UDP, ports 27031 to 27036</text>
+
+  <text x="434" y="170" text-anchor="middle" font-size="13" fill="#3d4a57">video, with error correction</text>
+
+  <text x="434" y="254" text-anchor="middle" font-size="13" fill="#3d4a57">audio</text>
+
+  <text x="434" y="338" text-anchor="middle" font-size="13" fill="#3d4a57">controllers, keyboard, mouse</text>
+
+  <!-- The TV -->
+  <rect x="560" y="60" width="410" height="370" rx="12" fill="#ffffff" stroke="#c5ced8" stroke-width="2"/>
+  <text x="765" y="98" text-anchor="middle" font-size="20" font-weight="700" fill="#1b2838">Samsung TV</text>
+  <text x="765" y="122" text-anchor="middle" font-size="14" fill="#57606a">Tizen Steam Link, a web app</text>
+
+  <rect x="578" y="150" width="180" height="236" rx="8" fill="#e8f3ff" stroke="#1a9fff"/>
+  <text x="668" y="184" text-anchor="middle" font-size="15" font-weight="600" fill="#1b2838">WebAssembly module</text>
+  <text x="668" y="214" text-anchor="middle" font-size="13" fill="#3d4a57">ihslib: pairing and</text>
+  <text x="668" y="232" text-anchor="middle" font-size="13" fill="#3d4a57">the stream, with</text>
+  <text x="668" y="250" text-anchor="middle" font-size="13" fill="#3d4a57">error correction</text>
+  <text x="668" y="284" text-anchor="middle" font-size="13" fill="#3d4a57">Opus audio decoder</text>
+  <text x="668" y="318" text-anchor="middle" font-size="13" fill="#3d4a57">controllers read</text>
+  <text x="668" y="336" text-anchor="middle" font-size="13" fill="#3d4a57">250 times a second</text>
+
+  <rect x="790" y="150" width="162" height="100" rx="8" fill="#eef1f4" stroke="#8b96a3"/>
+  <text x="871" y="186" text-anchor="middle" font-size="15" font-weight="600" fill="#1b2838">App interface</text>
+  <text x="871" y="210" text-anchor="middle" font-size="13" fill="#3d4a57">HTML, JavaScript</text>
+  <text x="871" y="230" text-anchor="middle" font-size="13" fill="#3d4a57">menus and settings</text>
+
+  <rect x="790" y="286" width="162" height="100" rx="8" fill="#eaf7ee" stroke="#3aa45a"/>
+  <text x="871" y="322" text-anchor="middle" font-size="15" font-weight="600" fill="#1b2838">Hardware decoder</text>
+  <text x="871" y="346" text-anchor="middle" font-size="13" fill="#3d4a57">picture and sound</text>
+  <text x="871" y="366" text-anchor="middle" font-size="13" fill="#3d4a57">with low latency</text>
+
+  <line x1="760" y1="200" x2="788" y2="200" stroke="#57606a" stroke-width="2"
+        marker-start="url(#small)" marker-end="url(#small)"/>
+  <line x1="760" y1="336" x2="788" y2="336" stroke="#57606a" stroke-width="2" marker-end="url(#small)"/>
+
+  <text x="500" y="462" text-anchor="middle" font-size="13" fill="#57606a">Pairing happens once per computer, with a four-digit PIN typed into Steam.</text>
+
+  <!-- Drawn last, over the boxes they touch -->
+  <line x1="290" y1="184" x2="576" y2="184" stroke="#1a9fff" stroke-width="3" marker-end="url(#head)"/>
+  <line x1="290" y1="268" x2="576" y2="268" stroke="#1a9fff" stroke-width="3" marker-end="url(#head)"/>
+  <line x1="578" y1="352" x2="292" y2="352" stroke="#1a9fff" stroke-width="3" marker-end="url(#head)"/>
+</svg>
