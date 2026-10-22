@@ -7,7 +7,7 @@
         '192.168.1.20': {hostname: 'gaming-pc', ostype: -184, universe: 1, gamesRunning: false},
         '192.168.1.31': {hostname: 'office-desktop', ostype: 20, universe: 1, gamesRunning: true},
     };
-    var frames = 0, bytes = 0, streaming = null, discovery = null;
+    var frames = 0, bytes = 0, audio = 0, streaming = null, discovery = null;
     window.tslMockLog = [];
 
     function emit(type, data, delay) {
@@ -75,8 +75,11 @@
             emit('streamStarting', {}, 700);
             emit('streamConnected', {}, 1100);
             streaming = setInterval(function () {
+                // window.tslMockFrozen = true stands in for a stuck stream (no frames, no audio).
+                if (window.tslMockFrozen) return;
                 frames += 60;
                 bytes += 2500000;
+                audio += 100;
             }, 1000);
             return true;
         },
@@ -106,7 +109,7 @@
         mouseWheel: function () {},
         stats: function () {
             return JSON.stringify({connected: !!streaming, videoFrames: frames, keyFrames: 3, videoBytes: bytes,
-                audioPackets: 0, width: 1920, height: 1080, videoCodec: 4, targetBitrate: 20000000,
+                audioPackets: audio, width: 1920, height: 1080, videoCodec: 4, targetBitrate: 20000000,
                 framerateNum: 60, framerateDen: 1, videoAppended: frames, videoFailed: 0, audioAppended: 0,
                 audioFailed: 0, silenceFilled: 0, videoPackets: frames * 18, videoPacketsLost: Math.floor(frames / 40),
                 lostReports: 1, roundTripMs: 3.4, fec: true, fecRecovered: Math.floor(frames / 45),

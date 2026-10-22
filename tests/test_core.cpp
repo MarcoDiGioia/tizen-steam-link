@@ -6,12 +6,14 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/client.h"
@@ -31,6 +33,8 @@ extern "C" {
 #include "session/channels/ch_data.h"
 #include "session/channels/ch_data_audio.h"
 #include "session/fec.h"
+#include "session/retransmission.h"
+#include "session/session_pri.h"
 #include "session/window.h"
 }
 
@@ -577,6 +581,27 @@ void TestPacketWindowDiscardAndReset() {
     IHS_SessionPacketsWindowDestroy(window);
 }
 
+// A gap longer than the window (Wi-Fi gone for a few seconds: 256 packets is 2.6 s of audio)
+// used to leave the channel dead. Every later packet was more than the window's capacity ahead
+// of the last one seen and was ignored, while the session went on. Add now refuses it, as on an
+// overflow, and the data channel starts over from it.
+void TestPacketWindowJumpAhead() {
+    IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(64);
+    for (uint16_t id = 0; id < 4; id++) CHECK(AddPacket(window, id, id * 10u));
+    for (int id = 0; id < 4; id++) CHECK_EQ(PollFrame(window), id);
+    CHECK(!AddPacket(window, 1000, 5000));  // 996 ahead of a 64-packet window
+    // What the data channel does when Add refuses a packet.
+    IHS_SessionPacketsWindowReset(window);
+    CHECK(AddPacket(window, 1000, 5000));
+    CHECK(AddPacket(window, 1001, 5010));
+    CHECK_EQ(PollFrame(window), 1000);
+    CHECK_EQ(PollFrame(window), 1001);
+    // A late copy of a packet already passed on is still ignored.
+    CHECK(AddPacket(window, 1000, 5000));
+    CHECK_EQ(PollFrame(window), -1);
+    IHS_SessionPacketsWindowDestroy(window);
+}
+
 void TestPacketWindowSkipLost() {
     IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(32);
     CHECK(AddPacket(window, 0, 0, 2));  // frame 0: packets 0, 1, 2; 1 is lost
@@ -806,6 +831,75 @@ void TestDataChannelGetsPastLostPacket() {
     IHS_SessionDestroy(session);
 }
 
+// A reliable packet waits for its ACK, and its timer sends it again after 10 ms. On Wi-Fi the
+// round trip is about that long, so an ACK often lands while the timer fires; with a controller
+// sending 250 reliable reports a second that happens constantly. Cancelling used to free the
+// pending packet on the receive thread while the timer's end callback freed it on the timer
+// thread, then stop a timer task that was already gone (a use-after-free under ASan).
+void TestRetransmissionCancelRacesTimer() {
+    uint8_t random[tsl::Identity::kRandomBytes] = {3};
+    tsl::Identity id = tsl::Identity::FromRandom(random, "test");
+    IHS_ClientConfig config = id.ClientConfig();
+    tsl::HostKey key{};
+    config.secretKey = key.data();
+    IHS_SessionInfo info{};
+    IHS_IPAddressFromString(&info.address.ip, "127.0.0.1");
+    info.address.port = 27031;
+    info.sessionKeyLen = 32;
+    IHS_Session *session = IHS_SessionCreate(&config, &info);
+    IHS_SessionRetransmission *retransmission = &session->retransmission;
+    auto queue = [&](uint16_t packetId) {
+        IHS_SessionPacket packet{};
+        packet.header.type = IHS_SessionPacketTypeReliable;
+        packet.header.channelId = IHS_SessionChannelIdControl;
+        packet.header.packetId = packetId;
+        packet.header.sendTimestamp = IHS_SessionPacketTimestamp();
+        IHS_SessionPacketBodyInitialize(&packet.body, false);
+        const uint8_t payload[1] = {0};
+        IHS_BufferAppendMem(&packet.body, payload, sizeof(payload));
+        bool queued = IHS_RetransmissionQueue(retransmission, &packet);
+        IHS_SessionPacketClear(&packet, true);
+        return queued;
+    };
+    // Nothing sends here (the session isn't connected), so a resend stays in the send queue.
+    auto resent = [&] {
+        IHS_MutexLock(session->sendQueueMutex);
+        bool any = !IHS_QueueIsEmpty(session->sendQueue);
+        IHS_MutexUnlock(session->sendQueueMutex);
+        return any;
+    };
+
+    // Acknowledged well before its timer: cancelled once, and never sent again.
+    CHECK(queue(1));
+    CHECK(IHS_RetransmissionCancel(retransmission, IHS_SessionChannelIdControl, 1, 0));
+    CHECK(!IHS_RetransmissionCancel(retransmission, IHS_SessionChannelIdControl, 1, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    CHECK(!resent());
+    // Not acknowledged: sent again when the timer fires.
+    CHECK(queue(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    CHECK(resent());
+
+    // ACKs around the 10 ms mark, from several threads at once. CHECK isn't thread-safe, so
+    // the threads count what failed.
+    std::atomic<int> notQueued{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; t++) {
+        threads.emplace_back([&, t] {
+            for (int i = 0; i < 200; i++) {
+                auto packetId = static_cast<uint16_t>(1000 + t * 1000 + i);
+                if (!queue(packetId)) notQueued++;
+                std::this_thread::sleep_for(std::chrono::microseconds(9000 + (i % 21) * 100));
+                IHS_RetransmissionCancel(retransmission, IHS_SessionChannelIdControl, packetId, 0);
+            }
+        });
+    }
+    for (auto &thread : threads) thread.join();
+    CHECK_EQ(notQueued.load(), 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    IHS_SessionDestroy(session);
+}
+
 }  // namespace
 
 int main() {
@@ -824,8 +918,10 @@ int main() {
     TestPacketWindowFullIsNotEmpty();
     TestPacketWindowDiscardAndReset();
     TestPacketWindowSkipLost();
+    TestPacketWindowJumpAhead();
     TestFec();
     TestDataChannelGetsPastLostPacket();
+    TestRetransmissionCancelRacesTimer();
     TestWakePacket();
     IHS_Quit();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

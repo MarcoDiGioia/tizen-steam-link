@@ -1,0 +1,23 @@
+Ask for the desktop only when the app asks for it.
+
+The streaming request always set stream_desktop, and Steam then streamed the desktop
+whatever stream_interface said, so k_EStreamInterfaceBigPicture never opened Big Picture.
+stream_desktop is now set for the default and desktop interfaces only.
+
+diff --git a/src/client/streaming.c b/src/client/streaming.c
+index 5972e26..e79d241 100644
+--- a/src/client/streaming.c
++++ b/src/client/streaming.c
+@@ -204,8 +204,11 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
+     message.has_stream_interface = true;
+     message.stream_interface = (EStreamInterface) request.streamingInterface;
+ 
++    // stream_desktop asks for the desktop whatever stream_interface says: with it always on,
++    // Steam streamed the desktop even for k_EStreamInterfaceBigPicture.
+     message.has_stream_desktop = true;
+-    message.stream_desktop = true;
++    message.stream_desktop = request.streamingInterface == IHS_StreamInterfaceDefault ||
++                             request.streamingInterface == IHS_StreamInterfaceDesktop;
+ 
+     message.has_form_factor = true;
+     message.form_factor = k_EStreamDeviceFormFactorTV;

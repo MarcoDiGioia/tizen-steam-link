@@ -377,6 +377,7 @@ void Usage() {
                  "  pair <ip> [--pin NNNN] [--wait S] pair this device; type the PIN into Steam on the host\n"
                  "  stream <ip> [--seconds N] [--out DIR] [--hevc] [--no-audio] [--max WxH] [--input-test]\n"
                  "              [--quality auto|fast|balanced|beautiful] [--bitrate KBPS] [--fps N] [--no-fec]\n"
+                 "              [--big-picture]\n"
                  "                                   stream and write video.h264/.hevc and audio.wav;\n"
                  "                                   --input-test plugs in a virtual pad and presses buttons\n"
                  "\n"
@@ -395,7 +396,7 @@ struct Args {
 };
 
 Args ParseArgs(int argc, char **argv) {
-    static const char *flags[] = {"--hevc", "--no-audio", "--input-test", "--no-fec", "-v"};
+    static const char *flags[] = {"--hevc", "--no-audio", "--input-test", "--no-fec", "--big-picture", "-v"};
     Args args;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -524,6 +525,7 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
         std::fprintf(stderr, "Bad --max %s\n", max.c_str());
         return 2;
     }
+    if (args.Has("--big-picture")) request.interface = IHS_StreamInterfaceBigPicture;
 
     auto paired = LoadPaired(dir);
     auto pairedIt = paired.find(ip);

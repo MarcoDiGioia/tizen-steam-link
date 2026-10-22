@@ -18,7 +18,9 @@ of it sit:
   ihslib's SDL backend.
 - `src/platform`: thread and UDP backends for ihslib. They replace its SDL thread backend, and
   its POSIX UDP code, which calls `fcntl()` on sockets. Samsung's socket layer aborts on that
-  call.
+  call. The stream's socket asks for a 4 MB receive buffer: a keyframe arrives as a burst of a
+  few hundred packets, more than the default buffer of about 200 KB holds, and what doesn't
+  fit is lost.
 - `src/tizen`: the WebAssembly module for the TV. Video goes to the TV's hardware decoder
   through Samsung's ElementaryMediaStreamSource. Audio arrives as Opus, gets decoded to PCM,
   and goes through the same player. Gamepads are read from the browser Gamepad API.
@@ -34,14 +36,18 @@ Dependencies (ihslib, mbedTLS 3.6, protobuf-c, Opus) are downloaded by CMake at 
 versions and checked by hash. Nothing is installed system-wide. ihslib is pinned to the head
 of its pull request #4, which adds the key exchange current Steam requires for pairing (an
 X25519 key masked with the PIN). The key Steam and the device agree on is per host, so the
-app stores one for each paired computer. `patches/ihslib` holds sixteen patches applied
+app stores one for each paired computer. `patches/ihslib` holds nineteen patches applied
 to ihslib at download time: two threading fixes, a thread function signature fix and a
 timestamp overflow fix the TV build needs, three fixes that let a stream get past lost
 packets (on Wi-Fi a single one used to end the session or freeze the video for good), stream
 statistics, forward error correction for video, the quality and bitrate settings, the codecs
 and picture size the client asks for, lost audio frames reported to the app, the host's MAC
-address, 250 Hz controller polling, a timeout for a host that went silent, and frame rates
-above 60. Each patch starts with a description of what it does.
+address, 250 Hz controller polling, a timeout for a host that went silent, frame rates above
+60, a streaming request that can open Big Picture (it always asked for the desktop), a
+use-after-free when Steam's acknowledgement of a packet arrived just as it was about to be sent
+again (likeliest during play, when a controller sends 250 reports a second), and data
+channels that start over after a gap longer than their window instead of going quiet for good.
+Each patch starts with a description of what it does.
 
 Video uses Steam's forward error correction: every video message comes with one or two
 parity packets, and the app rebuilds a message that lost up to that many packets instead of
@@ -114,6 +120,11 @@ sudo ufw allow from 192.168.0.0/24 to any port 27036:27037 proto tcp
 Steam chooses the codec. It streams HEVC only when it can encode it in hardware, and falls
 back to H.264 otherwise, even with HEVC selected in the settings.
 
+On a Linux desktop running Wayland (sway, for example), Steam started the usual way can't
+capture the desktop: the stream has sound but a black picture, and Steam's
+`logs/streaming_log.txt` says "Desktop capture unavailable, try running Steam with -pipewire"
+and "Desktop Black Frame". Steam's suggestion is to start it as `steam -pipewire`.
+
 ## Using it
 
 - Computers that answer on the network appear on their own. "Add by IP address" covers
@@ -139,17 +150,24 @@ back to H.264 otherwise, even with HEVC selected in the settings.
 - When the computer goes silent for 10 seconds (Wi-Fi out, the computer asleep), the stream
   ends and the app reconnects by itself, up to twice in a row, if the computer answers again
   within 15 seconds. A stream the computer ends itself isn't reconnected.
+- If the picture and the sound both stop for 15 seconds while the computer still answers, the
+  app ends that stream and reconnects the same way.
 - Lost audio packets are filled in by the Opus decoder (up to 80 ms per gap), so a short
   Wi-Fi hiccup is a smoothed-over moment instead of a cut.
 - Keyboards and mice plugged into the TV are passed through. Click the picture to capture
   the mouse.
 - The app reloads its page after each stream, which resets the video player.
 
-Settings cover the maximum resolution (720p to 4K), the frame rate (60 or 120 fps; 120 needs a
-TV with a 120 Hz panel and a computer that can keep up), H.264 or HEVC, Steam's quality
-preference (Automatic, Fast, Balanced, Beautiful), a bandwidth limit (Automatic, or 5 to
-100 Mbit/s; 30 by default), audio, and whether the stream opens on the desktop or in Big
-Picture. On a busy Wi-Fi network a lower bandwidth limit means fewer packets to lose.
+Settings cover the maximum resolution (720p to 4K), the frame rate (60 or 120 fps), H.264 or
+HEVC, Steam's quality preference (Automatic, Fast, Balanced, Beautiful), a bandwidth limit
+(Automatic, or 5 to 100 Mbit/s; 20 by default), audio, and whether the stream opens in Big
+Picture (the default, as in Steam's Steam Link app) or on the desktop. On a busy Wi-Fi network
+a lower bandwidth limit means smaller keyframes and fewer packets to lose.
+
+On a Samsung S90C, whose panel runs at 144 Hz, the app showed at most about 60 frames per
+second: a 120 fps stream was decoded in full, and about half its frames were dropped. 120 fps
+makes each frame shown a few milliseconds fresher and costs twice the packets, so 60 is the
+better choice on Wi-Fi.
 
 Steam sends HEVC only when the computer has a hardware encoder that can produce it; otherwise
 it falls back to H.264. For 4K, pick HEVC where the computer supports it, and a bandwidth
@@ -173,9 +191,9 @@ tsl-cli stream <ip> --seconds 20 --out /tmp/stream
 
 `pair` also takes `--pin NNNN` and `--wait SECONDS` (120 by default). `stream` also takes
 `--hevc`, `--no-audio`, `--max 1920x1080`, `--quality auto|fast|balanced|beautiful`,
-`--bitrate KBPS` (-1 lets Steam decide), `--fps N`, `--no-fec`, and `--input-test`, which plugs in a
-virtual gamepad, presses A and D-pad down, and sends Escape, so the effect shows in the
-recording. At the end it prints the frame count, audio frames lost and filled in, and a
+`--bitrate KBPS` (-1 lets Steam decide), `--fps N`, `--no-fec`, `--big-picture`, and
+`--input-test`, which plugs in a virtual gamepad, presses A and D-pad down, and sends Escape,
+so the effect shows in the recording. At the end it prints the frame count, audio frames lost and filled in, and a
 network summary: packets lost, messages rebuilt, keyframe requests and the round trip.
 The device identity and the paired computers, with their keys, are kept in
 `~/.config/tizen-steam-link`. The CLI has its own identity, so it is paired separately

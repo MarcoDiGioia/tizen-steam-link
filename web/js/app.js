@@ -44,8 +44,10 @@
             text: function (v) { return v ? 'Shown' : 'Hidden'; }},
     ];
 
-    var DEFAULT_SETTINGS = {resolution: 1, framerate: 60, hevc: false, quality: 2, bandwidth: 30000, audio: true,
-        bigPicture: false, stats: false};
+    // 20 Mbit/s, Moonlight's default for 1080p at 60 fps: on Wi-Fi a lower limit means smaller
+    // keyframes, so fewer packets to lose. Big Picture, as in Steam's own Steam Link app.
+    var DEFAULT_SETTINGS = {resolution: 1, framerate: 60, hevc: false, quality: 2, bandwidth: 20000, audio: true,
+        bigPicture: true, stats: false};
     var ONLINE_MS = 9000;
     var PAIR_TIMEOUT_MS = 120000;
     var CONNECT_TIMEOUT_MS = 30000;
@@ -55,6 +57,9 @@
     var MAX_RECONNECTS = 2;
     var RECONNECT_WAIT_MS = 15000;
     var RECONNECT_RESET_MS = 60000;
+    // No new video frame or audio packet for this long, with the session still up, means it is
+    // stuck: a host that goes quiet ends the session after 10 s, and that reconnects already.
+    var STALL_MS = 15000;
 
     var mod = null;  // WASM module, once ready
     var state = {
@@ -784,13 +789,13 @@
     function updateStats() {
         var s = state.stream;
         if (!s || !mod) return;
-        var st;
+        var st = null;
         try {
             st = JSON.parse(mod.stats());
-        } catch (e) {
-            return;
-        }
+        } catch (e) { /* counts as nothing new below */ }
         var now = Date.now();
+        checkStalled(s, st, now);
+        if (!st || s.ending) return;
         var text = '';
         if (s.last) {
             var dt = (now - s.last.time) / 1000;
@@ -806,6 +811,44 @@
         s.last = {time: now, videoFrames: st.videoFrames, videoBytes: st.videoBytes,
             videoPackets: st.videoPackets || 0, videoPacketsLost: st.videoPacketsLost || 0};
         $('#stream-stats').textContent = text;
+    }
+
+    // A frozen stream reconnects instead of staying frozen. Only once audio has arrived: with audio
+    // off, a still picture can mean no new frames for a while.
+    function checkStalled(s, st, now) {
+        if (s.ending) return;
+        var count = st ? st.videoFrames + st.audioPackets : -1;
+        var armed = (s.media && s.media.armed) || !!(st && st.audioPackets > 0);
+        if (!s.media || count !== s.media.count) {
+            s.media = {count: count, time: now, armed: armed};
+            return;
+        }
+        if (!armed || now - s.media.time < STALL_MS) return;
+        var stalled = 'No video or audio for ' + Math.round((now - s.media.time) / 1000) + ' s, reconnecting';
+        note('WARN [Stream] ' + stalled);
+        console.warn('[Stream] ' + stalled);
+        try {
+            mod.stopStream();
+        } catch (e) { /* reloading ends it anyway */ }
+        connectionLost(s, true, 'The stream stopped, reconnecting…');
+    }
+
+    // The host going silent, or the stream getting stuck, reconnects a few times in a row at
+    // most; the host ending the stream itself doesn't.
+    function connectionLost(s, retryable, retryText) {
+        s.ending = true;
+        var retry = retryable && state.reconnects < MAX_RECONNECTS;
+        try {
+            if (retry) {
+                sessionStorage.setItem('tsl.reconnect', JSON.stringify({ip: s.ip, count: state.reconnects + 1}));
+            } else {
+                sessionStorage.setItem('tsl.message', retryable
+                    ? 'Lost the connection to ' + s.hostname + '.'
+                    : s.hostname + ' ended the stream.');
+            }
+        } catch (e) { /* not important */ }
+        showStreamStatus(retry ? retryText : 'Disconnected');
+        setTimeout(reloadPage, retry ? 1500 : 6000);
     }
 
     function toggleStats() {
@@ -1170,23 +1213,7 @@
             var s = state.stream;
             if (!s) return;
             s.connected = false;
-            if (!s.ending) {
-                s.ending = true;
-                // The host going silent (Wi-Fi, a blip on its side) gets a reconnect, a few times in
-                // a row at most; the host ending the stream itself doesn't.
-                var retry = d && d.timedOut && state.reconnects < MAX_RECONNECTS;
-                try {
-                    if (retry) {
-                        sessionStorage.setItem('tsl.reconnect', JSON.stringify({ip: s.ip, count: state.reconnects + 1}));
-                    } else {
-                        sessionStorage.setItem('tsl.message', d && d.timedOut
-                            ? 'Lost the connection to ' + s.hostname + '.'
-                            : s.hostname + ' ended the stream.');
-                    }
-                } catch (e) { /* not important */ }
-                showStreamStatus(retry ? 'Connection lost, reconnecting…' : 'Disconnected');
-                setTimeout(reloadPage, retry ? 1500 : 6000);
-            }
+            if (!s.ending) connectionLost(s, !!(d && d.timedOut), 'Connection lost, reconnecting…');
         });
         tsl.on('streamEnded', function () {
             if (state.stream) reloadPage();

@@ -1,7 +1,7 @@
 /*
  * UDP backend for ihslib (ihs_udp.h), used instead of its platforms/ihs_udp_posix.c.
  *
- * Two differences, both for the Tizen Sockets Extension:
+ * The differences, mostly for the Tizen Sockets Extension:
  *  - No fcntl(): Samsung's Emscripten aborts on fcntl(F_SETFL) for sockets, and ihslib's
  *    client calls IHS_UDPSocketSetBlocking() on startup. Sockets stay blocking.
  *  - Receive timeouts use poll() instead of SO_RCVTIMEO. Sockets without an explicit
@@ -13,6 +13,11 @@
  *  - Sockets are bound (0.0.0.0, any port) as soon as they are created, as Moonlight for
  *    Tizen does with its UDP sockets. ihslib starts polling before its first send, and
  *    Linux only binds a socket implicitly on that send.
+ *  - The session socket asks for a receive buffer of a few MB. A keyframe arrives as a
+ *    burst of a few hundred datagrams (190 to 340, up to 0.5 MB, for a Steam Deck's
+ *    1280x800 HEVC), more than the default buffer (about 200 KB on Linux) holds while the
+ *    receive thread catches up, and whatever doesn't fit is dropped before ihslib sees it.
+ *    Moonlight sizes its video socket's buffer for 2048 packets.
  *  - Problems are reported through TSL_PlatformLogHook (set by the app's logging) instead
  *    of being dropped.
  *  - Desktop builds only: TSL_TEST_RECV_LOSS=<percent> drops that share of incoming
@@ -44,6 +49,9 @@
 #define DEFAULT_TIMEOUT_MS 50
 /* After a poll() error, wait this long before trying again instead of spinning. */
 #define ERROR_BACKOFF_US 20000
+/* Receive buffer sizes to ask for, largest first: the kernel caps a request at
+ * net.core.rmem_max, and other stacks may refuse a large one outright. */
+static const int RECV_BUFFER_SIZES[] = {4 << 20, 2 << 20, 1 << 20, 512 << 10};
 
 /* Set by the app (src/core/log.cpp). NULL means problems go to stderr. */
 void (*TSL_PlatformLogHook)(int warning, const char *message) = NULL;
@@ -145,6 +153,21 @@ static void AddressFromSys(IHS_SocketAddress *ihs, const struct sockaddr_storage
 
 static socklen_t AddressToSys(const IHS_SocketAddress *ihs, struct sockaddr_storage *sys);
 
+static void EnlargeReceiveBuffer(int fd) {
+    for (size_t i = 0; i < sizeof(RECV_BUFFER_SIZES) / sizeof(RECV_BUFFER_SIZES[0]); i++) {
+        int size = RECV_BUFFER_SIZES[i];
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) == 0) {
+            break;
+        }
+    }
+    int actual = 0;
+    socklen_t len = sizeof(actual);
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &actual, &len) == 0) {
+        /* Linux reports twice what it reserved for data, the rest being its bookkeeping. */
+        PlatformLog(0, "UDP socket %d receive buffer: %d bytes", fd, actual);
+    }
+}
+
 IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
@@ -160,6 +183,8 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
         if (setsockopt(s->fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) != 0) {
             PlatformLog(1, "SO_BROADCAST failed: errno %d", errno);
         }
+    } else {
+        EnlargeReceiveBuffer(fd);
     }
     struct sockaddr_in any;
     memset(&any, 0, sizeof(any));
