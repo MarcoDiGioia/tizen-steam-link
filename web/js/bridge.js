@@ -8,12 +8,16 @@
     'use strict';
 
     var listeners = {};
+    // A fatal error can come before the UI listens for it (a module that fails as it loads);
+    // the UI gets it when it starts listening.
+    var fatal = null;
     var resolveReady;
     var ready = new Promise(function (resolve) {
         resolveReady = resolve;
     });
 
     function dispatch(type, data) {
+        if (type === 'fatal' && !fatal) fatal = data;
         var fns = (listeners[type] || []).concat(listeners['*'] || []);
         for (var i = 0; i < fns.length; i++) {
             try {
@@ -44,6 +48,7 @@
         ready: ready,
         on: function (type, fn) {
             (listeners[type] = listeners[type] || []).push(fn);
+            if (type === 'fatal' && fatal) fn(fatal, type);
         },
         emit: dispatch,
     };

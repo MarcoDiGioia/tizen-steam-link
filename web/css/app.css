@@ -9,18 +9,21 @@
 @font-face {
     font-family: "Figtree";
     font-weight: 400;
+    font-display: swap;
     src: url("../fonts/figtree-latin-400.woff2") format("woff2");
 }
 
 @font-face {
     font-family: "Figtree";
     font-weight: 500;
+    font-display: swap;
     src: url("../fonts/figtree-latin-500.woff2") format("woff2");
 }
 
 @font-face {
     font-family: "Figtree";
     font-weight: 700;
+    font-display: swap;
     src: url("../fonts/figtree-latin-700.woff2") format("woff2");
 }
 

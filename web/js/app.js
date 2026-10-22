@@ -60,9 +60,12 @@
     // No new video frame or audio packet for this long, with the session still up, means it is
     // stuck: a host that goes quiet ends the session after 10 s, and that reconnects already.
     var STALL_MS = 15000;
+    // Far longer than the module takes to start on the TVs it was tried on.
+    var STARTUP_TIMEOUT_MS = 30000;
 
     var mod = null;  // WASM module, once ready
     var state = {
+        fatal: false,  // the module failed or can't start; streaming is off
         hosts: {},
         reconnects: 0,  // automatic reconnects in a row
         settings: {},
@@ -167,12 +170,14 @@
 
     var toastTimer = null;
 
-    function toast(text, bad) {
+    // sticky: stays until another toast replaces it, for errors the app can't get past.
+    function toast(text, bad, sticky) {
         var el = $('#toast');
         el.textContent = text;
         el.className = 'toast' + (bad ? ' bad' : '');
         el.hidden = false;
         clearTimeout(toastTimer);
+        if (sticky) return;
         toastTimer = setTimeout(function () {
             el.hidden = true;
         }, bad ? 7000 : 4000);
@@ -1256,8 +1261,9 @@
             note('stream failed: ' + d.reason);
         });
         tsl.on('fatal', function (d) {
+            state.fatal = true;
             note('FATAL ' + d.message);
-            toast(d.message, true);
+            toast(d.message, true, true);
         });
     }
 
@@ -1361,6 +1367,20 @@
         } catch (e) { /* not important */ }
         if (message) toast(message);
         state.reconnects = reconnect ? reconnect.count : 0;
+
+        // Without WebAssembly (TVs older than Tizen 5.5) the module can't load at all, and a module
+        // that never finishes starting leaves a page that looks fine but can't do anything. Say so.
+        if (typeof WebAssembly !== 'object') {
+            tsl.emit('fatal', {message: "This TV can't run the streaming part of the app. It needs " +
+                    'Tizen 5.5 or later (2020 models on).'});
+        }
+        setTimeout(function () {
+            if (!mod && !state.fatal) {
+                tsl.emit('fatal', {message: "The streaming part of the app hasn't started after " +
+                        STARTUP_TIMEOUT_MS / 1000 + ' seconds. Restart the TV fully (hold the power ' +
+                        'button), then open the app again.'});
+            }
+        }, STARTUP_TIMEOUT_MS);
 
         tsl.ready.then(function (m) {
             var identity = store.get('identity', null);

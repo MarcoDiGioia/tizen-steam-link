@@ -83,4 +83,6 @@ The TV is paired with that computer from then on. Each computer needs its own pa
 | The computer doesn't show up in the app | Check the firewall rules in step 2, that both are on the same network, and that Steam is running. Other computer, with the IP address, works when the network blocks discovery. |
 | "This device is not paired with the host" | Steam forgot the TV. The tile shows Pair to stream again; pair once more. |
 | The app stops opening after a TV firmware update | The update turned Developer Mode off. Repeat step 3 and reinstall (step 4). |
+| "This TV can't run the streaming part of the app" | The TV is older than Tizen 5.5 (a 2019 model or earlier). The app needs the WebAssembly support Samsung added in 2020 models. |
+| "The streaming part of the app hasn't started" | Restart the TV fully by holding the power button, then open the app again. If it keeps happening, [open an issue](https://github.com/pebeto/tizen-steam-link/issues) with the TV's model code (Settings, Support, About This TV). |
 | The app opens but something else is wrong | Press the blue key for the app's log. [development.md](development.md#debugging-on-the-tv) explains how to attach Chrome's inspector to the app. |

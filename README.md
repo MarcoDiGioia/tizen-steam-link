@@ -118,6 +118,8 @@ safer choice on Wi-Fi.
 | "This device is not paired with the host" | Steam forgot the TV. Select the computer and pair again. |
 | Sound but a black picture, from a Linux computer | Steam started the usual way can't capture a Wayland desktop (sway, for example). Steam's log suggests starting it with `steam -pipewire`. |
 | The app stops opening after a TV update | The update turned Developer Mode off. Turn it on again and reinstall, as in [docs/install.md](docs/install.md). |
+| "This TV can't run the streaming part of the app" | The TV is older than Tizen 5.5 (a 2019 model or earlier), and the app can't run on it. |
+| "The streaming part of the app hasn't started" | Restart the TV fully by holding the power button, then open the app again. |
 | Anything else | Press the blue key to see the app's log. |
 
 ## More
