@@ -831,6 +831,16 @@ void TestDataChannelGetsPastLostPacket() {
     IHS_SessionDestroy(session);
 }
 
+// The host silence check reads the clock, then the last packet's time. A packet arriving in
+// between can be 1 ms newer than the clock reading: that is no silence, not 4294967295 ms of it,
+// which used to end live streams.
+void TestSilenceMs() {
+    CHECK_EQ(IHS_SessionSilenceMs(1000, 1001), -1);
+    CHECK(IHS_SessionSilenceMs(1000, 1001) < 10000);
+    CHECK_EQ(IHS_SessionSilenceMs(12000, 1000), 11000);
+    CHECK_EQ(IHS_SessionSilenceMs(5, 0xFFFFFFF0u), 21);  // the 32-bit millisecond clock wraps
+}
+
 // A reliable packet waits for its ACK, and its timer sends it again after 10 ms. On Wi-Fi the
 // round trip is about that long, so an ACK often lands while the timer fires; with a controller
 // sending 250 reliable reports a second that happens constantly. Cancelling used to free the
@@ -922,6 +932,7 @@ int main() {
     TestFec();
     TestDataChannelGetsPastLostPacket();
     TestRetransmissionCancelRacesTimer();
+    TestSilenceMs();
     TestWakePacket();
     IHS_Quit();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

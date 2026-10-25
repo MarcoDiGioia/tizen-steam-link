@@ -132,3 +132,4 @@ Each patch starts with a description of what it does and why.
 | 0018 | Asks Steam for the desktop only when the app wants it, so Big Picture can open. |
 | 0019 | Fixes a use-after-free when Steam's confirmation of a packet arrived just as it was about to be resent, which is likeliest during play. |
 | 0020 | Starts a data channel over after a gap longer than its window, instead of leaving it quiet for good. |
+| 0021 | Fixes a race in the silence check that could end a live stream with "Nothing from the host for 4294967295 ms". |
