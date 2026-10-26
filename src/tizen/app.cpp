@@ -503,7 +503,9 @@ private:
                 if (connected != padConnected[i]) {
                     TSL_GamepadInfo info{};
                     if (connected) {
-                        TSL_GamepadParseIds(pad.id, &info.vendorId, &info.productId);
+                        if (!TSL_GamepadParseIds(pad.id, &info.vendorId, &info.productId)) {
+                            TSL_GamepadGuessIds(pad.id, &info.vendorId, &info.productId);
+                        }
                         std::snprintf(info.name, sizeof(info.name), "%s", pad.id);
                     }
                     session->SetGamepadConnected(i, connected, &info);
