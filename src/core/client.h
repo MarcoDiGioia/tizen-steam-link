@@ -32,6 +32,8 @@ struct StreamRequest {
     int maxHeight = 1080;
     int audioChannels = 2;
     IHS_StreamInterface interface = IHS_StreamInterfaceDefault;
+    // The display can show HDR; goes with SessionOptions::hdr.
+    bool hdr = false;
 };
 
 // Everything that happens before a stream: finding hosts, pairing, asking for a stream.

@@ -1,0 +1,157 @@
+Let the app ask for HDR, and tell it which colorspace the host sends.
+
+Current Steam streams HDR10 to a client that says its display can show it: the streaming
+request's display_hdr (23), and HDR10 (5) among the client caps' supported_colorspaces. Both are
+newer than ihslib's copy of the protocol, so display_hdr goes out as an unknown field and HDR10 as
+a raw enum value. IHS_SessionConfig.enableHdr and IHS_StreamingRequest.displayHdr turn them on.
+
+CStartVideoDataMsg now also carries the stream's colorspace (6), which protobuf-c keeps among the
+unknown fields; IHS_StreamVideoConfig.colorspace passes it on, so the app can set up its decoder
+for 10-bit video. IHS_UnknownVarint in pb_utils.h reads such a field.
+
+diff --git a/include/ihslib/client.h b/include/ihslib/client.h
+index 0947759..aeb9c8b 100644
+--- a/include/ihslib/client.h
++++ b/include/ihslib/client.h
+@@ -88,6 +88,8 @@ typedef struct IHS_StreamingRequest {
+     } maxResolution;
+     int32_t audioChannelCount;
+     IHS_StreamInterface streamingInterface;
++    /** The display can show HDR (see IHS_SessionConfig.enableHdr). */
++    bool displayHdr;
+ } IHS_StreamingRequest;
+ 
+ typedef struct IHS_ClientDiscoveryCallbacks {
+diff --git a/include/ihslib/session.h b/include/ihslib/session.h
+index 4dd108a..d259f66 100644
+--- a/include/ihslib/session.h
++++ b/include/ihslib/session.h
+@@ -60,6 +60,12 @@ typedef struct IHS_SessionConfig {
+     int maxHeight;
+     /** Frames per second the client can show; 0 keeps 59.94. */
+     int maxFramerate;
++    /**
++     * The display can show HDR: HDR10 joins the colorspaces the client supports. Steam then sends
++     * HDR10 (10-bit HEVC) when the host's display is in HDR, and IHS_StreamVideoConfig.colorspace
++     * says which colorspace it chose. Set the streaming request's displayHdr too.
++     */
++    bool enableHdr;
+ } IHS_SessionConfig;
+ 
+ typedef struct IHS_StreamSessionCallbacks {
+diff --git a/include/ihslib/video.h b/include/ihslib/video.h
+index d2c1c54..fe705a7 100644
+--- a/include/ihslib/video.h
++++ b/include/ihslib/video.h
+@@ -43,6 +43,17 @@ typedef enum IHS_StreamVideoCodec {
+     IHS_StreamVideoCodecORBX2 = 7,
+ } IHS_StreamVideoCodec;
+ 
++/** The video stream's colorspace, as Steam names it (EStreamColorspace). */
++typedef enum IHS_StreamVideoColorspace {
++    IHS_StreamVideoColorspaceUnknown = 0,
++    IHS_StreamVideoColorspaceBT601 = 1,
++    IHS_StreamVideoColorspaceBT601Full = 2,
++    IHS_StreamVideoColorspaceBT709 = 3,
++    IHS_StreamVideoColorspaceBT709Full = 4,
++    /** HDR10: 10-bit, BT.2020 primaries, PQ transfer. */
++    IHS_StreamVideoColorspaceHDR10 = 5,
++} IHS_StreamVideoColorspace;
++
+ typedef enum IHS_StreamVideoFrameFlag {
+     IHS_StreamVideoFrameNone = 0x00,
+     IHS_StreamVideoFrameKeyFrame = 0x01,
+@@ -53,6 +64,8 @@ typedef struct IHS_StreamVideoConfig {
+     IHS_StreamVideoCodec codec;
+     uint8_t *codecData;
+     size_t codecDataLen;
++    /** What the host says it sends; Unknown when it doesn't say. */
++    IHS_StreamVideoColorspace colorspace;
+ } IHS_StreamVideoConfig;
+ 
+ typedef enum IHS_StreamVideoSubmitResult {
+diff --git a/src/client/streaming.c b/src/client/streaming.c
+index e79d241..afcfc51 100644
+--- a/src/client/streaming.c
++++ b/src/client/streaming.c
+@@ -221,6 +221,15 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
+     EStreamTransport transports[] = {k_EStreamTransportUDP};
+     message.supported_transport = transports;
+ 
++    // display_hdr (23) is newer than ihslib's copy of the protocol; protobuf-c packs unknown fields
++    // as they are.
++    uint8_t hdrOn = 1;
++    ProtobufCMessageUnknownField hdrField = {23, PROTOBUF_C_WIRE_TYPE_VARINT, 1, &hdrOn};
++    if (request.displayHdr) {
++        message.base.n_unknown_fields = 1;
++        message.base.unknown_fields = &hdrField;
++    }
++
+     IHS_ClientLog(client, IHS_LogLevelDebug, "Client", "Sending streaming request packet to host %s", host.hostname);
+     IHS_ClientSend(client, host.address, k_ERemoteDeviceStreamingRequest, (ProtobufCMessage *) &message);
+     return 3000;
+diff --git a/src/protobuf/pb_utils.h b/src/protobuf/pb_utils.h
+index 10ec321..c489401 100644
+--- a/src/protobuf/pb_utils.h
++++ b/src/protobuf/pb_utils.h
+@@ -41,3 +41,26 @@
+ 
+ #define IHS_UNPACK_BUFFER_SIZE(unpack_fn, buffer, size) unpack_fn(NULL, (size), IHS_BufferPointer((buffer)))
+ 
++/**
++ * The value of a varint field that ihslib's copy of the protocol doesn't know yet. protobuf-c keeps
++ * such fields among the message's unknown fields when it unpacks. Returns fallback when the field
++ * isn't there.
++ */
++static inline uint64_t IHS_UnknownVarint(const ProtobufCMessage *message, uint32_t field, uint64_t fallback) {
++    for (unsigned i = 0; i < message->n_unknown_fields; i++) {
++        const ProtobufCMessageUnknownField *f = &message->unknown_fields[i];
++        if (f->tag != field || f->wire_type != PROTOBUF_C_WIRE_TYPE_VARINT) {
++            continue;
++        }
++        uint64_t value = 0;
++        for (size_t b = 0; b < f->len && b < 10; b++) {
++            value |= (uint64_t) (f->data[b] & 0x7f) << (7 * b);
++            if (!(f->data[b] & 0x80)) {
++                break;
++            }
++        }
++        return value;
++    }
++    return fallback;
++}
++
+diff --git a/src/session/channels/ch_control_negotiation.c b/src/session/channels/ch_control_negotiation.c
+index 5fbca86..2c5cb45 100644
+--- a/src/session/channels/ch_control_negotiation.c
++++ b/src/session/channels/ch_control_negotiation.c
+@@ -196,6 +196,14 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
+         PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc, true);
+     }
+     PROTOBUF_C_SET_VALUE(clientCaps, form_factor, k_EStreamDeviceFormFactorTV);
++    // HDR10 (5) is newer than ihslib's copy of EStreamColorspace. Without a list Steam picks an SDR
++    // colorspace, so the list is only sent to offer HDR10, with the SDR ones next to it.
++    EStreamColorspace colorspaces[] = {k_EStreamColorspace_BT709, k_EStreamColorspace_BT601,
++                                       (EStreamColorspace) 5};
++    if (ihsConf.enableHdr) {
++        clientCaps.n_supported_colorspaces = sizeof(colorspaces) / sizeof(colorspaces[0]);
++        clientCaps.supported_colorspaces = colorspaces;
++    }
+ 
+     // supported_video_codecs (15) is newer than ihslib's copy of the protocol, where the caps only
+     // have supports_video_hevc, which current Steam marks obsolete. Repeated, unpacked: one
+diff --git a/src/session/channels/video/ch_data_video.c b/src/session/channels/video/ch_data_video.c
+index d90ee90..3d26c65 100644
+--- a/src/session/channels/video/ch_data_video.c
++++ b/src/session/channels/video/ch_data_video.c
+@@ -160,6 +160,10 @@ static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
+     videoCh->config.width = message->width;
+     videoCh->config.height = message->height;
+     videoCh->config.codec = (IHS_StreamVideoCodec) message->codec;
++    // colorspace (6) is newer than ihslib's copy of the protocol: protobuf-c keeps it as an unknown
++    // field.
++    videoCh->config.colorspace = (IHS_StreamVideoColorspace) IHS_UnknownVarint(&message->base, 6,
++                                                                               IHS_StreamVideoColorspaceUnknown);
+     if (message->has_codec_data) {
+         videoCh->config.codecDataLen = message->codec_data.len;
+         videoCh->config.codecData = malloc(videoCh->config.codecDataLen);

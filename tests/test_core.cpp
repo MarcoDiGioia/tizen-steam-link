@@ -30,6 +30,8 @@ extern "C" {
 #include "ihs_buffer.h"
 #include "ihs_enumeration.h"
 #include "protobuf/discovery.pb-c.h"
+#include "protobuf/pb_utils.h"
+#include "protobuf/remoteplay.pb-c.h"
 #include "session/channels/ch_data.h"
 #include "session/channels/ch_data_audio.h"
 #include "session/fec.h"
@@ -602,6 +604,32 @@ void TestPacketWindowJumpAhead() {
     IHS_SessionPacketsWindowDestroy(window);
 }
 
+// Steam sends the stream's colorspace in CStartVideoDataMsg field 6, which ihslib's copy of the
+// protocol doesn't know: protobuf-c keeps it as an unknown field, and IHS_UnknownVarint reads it.
+void TestUnknownVarint() {
+    auto roundTrip = [](uint8_t *varint, size_t len) {
+        CStartVideoDataMsg sent = CSTART_VIDEO_DATA_MSG__INIT;
+        sent.channel = 4;
+        PROTOBUF_C_SET_VALUE(sent, codec, k_EStreamVideoCodecHEVC);
+        ProtobufCMessageUnknownField colorspace = {6, PROTOBUF_C_WIRE_TYPE_VARINT, len, varint};
+        if (len > 0) {
+            sent.base.n_unknown_fields = 1;
+            sent.base.unknown_fields = &colorspace;
+        }
+        std::vector<uint8_t> packed(cstart_video_data_msg__get_packed_size(&sent));
+        cstart_video_data_msg__pack(&sent, packed.data());
+        CStartVideoDataMsg *got = cstart_video_data_msg__unpack(nullptr, packed.size(), packed.data());
+        uint64_t value = got ? IHS_UnknownVarint(&got->base, 6, 99) : 0;
+        if (got) cstart_video_data_msg__free_unpacked(got, nullptr);
+        return value;
+    };
+    uint8_t hdr10[] = {5};
+    CHECK_EQ(roundTrip(hdr10, sizeof(hdr10)), 5u);  // k_EStreamColorspace_HDR10
+    CHECK_EQ(roundTrip(nullptr, 0), 99u);          // not sent: the fallback
+    uint8_t twoBytes[] = {0xac, 0x02};
+    CHECK_EQ(roundTrip(twoBytes, sizeof(twoBytes)), 300u);
+}
+
 void TestPacketWindowSkipLost() {
     IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(32);
     CHECK(AddPacket(window, 0, 0, 2));  // frame 0: packets 0, 1, 2; 1 is lost
@@ -919,6 +947,7 @@ int main() {
     TestPacketWindowDiscardAndReset();
     TestPacketWindowSkipLost();
     TestPacketWindowJumpAhead();
+    TestUnknownVarint();
     TestFec();
     TestDataChannelGetsPastLostPacket();
     TestRetransmissionCancelRacesTimer();

@@ -46,6 +46,9 @@ struct SessionOptions {
     int maxHeight = 0;
     // Frames per second to ask for; 0 = 59.94.
     int maxFramerate = 0;
+    // Offer HDR10. Steam sends it, as 10-bit HEVC, when the host's display is in HDR, so it only
+    // takes effect together with hevc. Set StreamRequest::hdr too.
+    bool hdr = false;
 };
 
 struct SessionStats {
@@ -57,6 +60,7 @@ struct SessionStats {
     uint32_t width = 0;
     uint32_t height = 0;
     IHS_StreamVideoCodec videoCodec = IHS_StreamVideoCodecNone;
+    IHS_StreamVideoColorspace colorspace = IHS_StreamVideoColorspaceUnknown;
     IHS_StreamAudioCodec audioCodec = IHS_StreamAudioCodecNone;
     int32_t targetBitrate = 0;  // kbit/s, as Steam sends it
     uint32_t framerateNum = 0;
@@ -149,6 +153,7 @@ private:
     std::atomic<uint64_t> videoFrames_{0}, keyFrames_{0}, videoBytes_{0}, audioPackets_{0}, audioBytes_{0};
     std::atomic<uint32_t> width_{0}, height_{0};
     std::atomic<int> videoCodec_{IHS_StreamVideoCodecNone}, audioCodec_{IHS_StreamAudioCodecNone};
+    std::atomic<int> colorspace_{IHS_StreamVideoColorspaceUnknown};
     std::atomic<int32_t> bitrate_{0};
     std::atomic<uint32_t> fpsNum_{0}, fpsDen_{0};
 };

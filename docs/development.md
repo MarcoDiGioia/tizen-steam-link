@@ -113,6 +113,7 @@ tsl-cli stream <ip> --seconds 20 --out /tmp/stream
 | `--fps N` | The frame rate to ask for. |
 | `--no-fec` | Turn off error correction. |
 | `--big-picture` | Open Big Picture instead of the desktop. |
+| `--hdr` | Offer HDR10, which comes as HEVC; the summary then says `HDR10` if Steam sent it. |
 | `--input-test` | Plug in a virtual gamepad, press A and D-pad down, and send Escape, so the effect shows in the recording. |
 
 At the end it prints the frame count, the audio frames lost and filled in, and a network

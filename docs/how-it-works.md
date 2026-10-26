@@ -14,8 +14,10 @@ feeds the picture and sound to the TV's hardware decoder. The TV side follows th
 2. Pairing: the TV makes up a four-digit PIN, and Steam asks for it on the computer. The two
    then agree on a key (an X25519 key exchange masked with the PIN). The key is per computer,
    so the app keeps one for each.
-3. The app asks Steam to stream, and says what it can take: H.264 or HEVC, the largest
-   picture, the frame rate, the bitrate, and whether to open Big Picture.
+3. The app asks Steam to stream, and says what it can take: H.264 or HEVC, HDR10 or not, the
+   largest picture, the frame rate, the bitrate, and whether to open Big Picture. With HDR on,
+   the TV's player takes HEVC's 10-bit profile, and the TV switches to HDR from the signalling
+   in the stream.
 4. Steam captures the screen, encodes it, and sends it over UDP with error correction data.
    Sound comes as Opus, which the module decodes to PCM.
 5. The module hands video and sound to the TV's player, Samsung's
@@ -52,7 +54,7 @@ with a simulated computer.
 
 | Line | What it shows |
 |---|---|
-| `1920x1080 H.264` | The picture size and the codec Steam chose. |
+| `1920x1080 H.264` | The picture size and the codec Steam chose, with `HDR` after it when Steam sends HDR10. |
 | `60 fps 20.0 Mbit/s` | Frames and data arriving each second. |
 | `target 20.0 Mbit/s @ 60 fps` | What Steam is aiming for. |
 | `keyframes`, `failed appends` | Keyframes received, and frames the TV's player refused. |
@@ -132,3 +134,4 @@ Each patch starts with a description of what it does and why.
 | 0018 | Asks Steam for the desktop only when the app wants it, so Big Picture can open. |
 | 0019 | Fixes a use-after-free when Steam's confirmation of a packet arrived just as it was about to be resent, which is likeliest during play. |
 | 0020 | Starts a data channel over after a gap longer than its window, instead of leaving it quiet for good. |
+| 0021 | Lets the app offer HDR10 to Steam, and passes on the colorspace Steam chose for the stream. |

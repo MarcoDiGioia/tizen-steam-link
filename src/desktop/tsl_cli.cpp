@@ -377,7 +377,7 @@ void Usage() {
                  "  pair <ip> [--pin NNNN] [--wait S] pair this device; type the PIN into Steam on the host\n"
                  "  stream <ip> [--seconds N] [--out DIR] [--hevc] [--no-audio] [--max WxH] [--input-test]\n"
                  "              [--quality auto|fast|balanced|beautiful] [--bitrate KBPS] [--fps N] [--no-fec]\n"
-                 "              [--big-picture]\n"
+                 "              [--big-picture] [--hdr]\n"
                  "                                   stream and write video.h264/.hevc and audio.wav;\n"
                  "                                   --input-test plugs in a virtual pad and presses buttons\n"
                  "\n"
@@ -396,7 +396,7 @@ struct Args {
 };
 
 Args ParseArgs(int argc, char **argv) {
-    static const char *flags[] = {"--hevc", "--no-audio", "--input-test", "--no-fec", "--big-picture", "-v"};
+    static const char *flags[] = {"--hevc", "--no-audio", "--input-test", "--no-fec", "--big-picture", "--hdr", "-v"};
     Args args;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -526,6 +526,7 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
         return 2;
     }
     if (args.Has("--big-picture")) request.interface = IHS_StreamInterfaceBigPicture;
+    request.hdr = args.Has("--hdr");
 
     auto paired = LoadPaired(dir);
     auto pairedIt = paired.find(ip);
@@ -561,7 +562,8 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
 
     tsl::SessionOptions options;
     options.audio = !args.Has("--no-audio");
-    options.hevc = args.Has("--hevc");
+    options.hdr = args.Has("--hdr");
+    options.hevc = args.Has("--hevc") || options.hdr;  // HDR10 comes as HEVC
     options.fec = !args.Has("--no-fec");
     static const std::map<std::string, int> qualities = {
             {"auto", -1}, {"fast", 1}, {"balanced", 2}, {"beautiful", 3}};
@@ -622,9 +624,10 @@ int CmdStream(const tsl::Identity &identity, const std::string &dir, const Args 
 
     tsl::SessionStats s = session.Stats();
     double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
-    std::printf("Video: %llu frames (%llu keyframes), %.1f MB, %ux%u, ~%.1f Mbit/s\n",
+    std::printf("Video: %llu frames (%llu keyframes), %.1f MB, %ux%u%s, ~%.1f Mbit/s\n",
                 static_cast<unsigned long long>(s.videoFrames), static_cast<unsigned long long>(s.keyFrames),
-                s.videoBytes / 1e6, s.width, s.height, elapsed > 0 ? s.videoBytes * 8 / elapsed / 1e6 : 0.0);
+                s.videoBytes / 1e6, s.width, s.height, s.colorspace == IHS_StreamVideoColorspaceHDR10 ? " HDR10" : "",
+                elapsed > 0 ? s.videoBytes * 8 / elapsed / 1e6 : 0.0);
     std::printf("Audio: %llu packets, %llu bytes, %llu decode errors, %llu lost (%llu filled in)\n",
                 static_cast<unsigned long long>(s.audioPackets), static_cast<unsigned long long>(s.audioBytes),
                 static_cast<unsigned long long>(sink.decode_errors()), static_cast<unsigned long long>(sink.audio_lost()),

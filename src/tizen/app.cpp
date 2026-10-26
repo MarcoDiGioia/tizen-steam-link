@@ -282,6 +282,7 @@ public:
                std::to_string(s.keyFrames) + ",\"videoBytes\":" + std::to_string(s.videoBytes) +
                ",\"audioPackets\":" + std::to_string(s.audioPackets) + ",\"width\":" + std::to_string(s.width) +
                ",\"height\":" + std::to_string(s.height) + ",\"videoCodec\":" + std::to_string(s.videoCodec) +
+               ",\"colorspace\":" + std::to_string(s.colorspace) +
                ",\"targetBitrate\":" + std::to_string(s.targetBitrate) + ",\"framerateNum\":" +
                std::to_string(s.framerateNum) + ",\"framerateDen\":" + std::to_string(s.framerateDen) +
                ",\"videoAppended\":" + std::to_string(c.videoAppended) + ",\"videoFailed\":" +
@@ -389,6 +390,7 @@ public:
             IHS_SessionInfo sessionInfo = info;
             sessionInfo.steamId = params.steamId;
             player_.SetHevcSupported(params.options.hevc);
+            player_.SetHdr(params.options.hdr);
             player_.SetAudioEnabled(params.options.audio);
             player_.SetFramerate(static_cast<uint32_t>(params.options.maxFramerate));
             auto session =
@@ -586,9 +588,10 @@ bool Pair(const std::string &ip, const std::string &pin) { return g_app->Pair(ip
 void CancelPair() { g_app->CancelPair(); }
 
 // quality: Steam's preference (-1 automatic, 1 fast, 2 balanced, 3 beautiful). bitrateKbps: -1 lets
-// Steam decide. fps: 60 or 120.
+// Steam decide. fps: 60 or 120. hdr: offer HDR10, which comes as HEVC, so it turns hevc on too.
 bool StartStream(const std::string &ip, const std::string &steamId, const std::string &keyHex, int maxWidth,
-                 int maxHeight, bool hevc, bool audio, bool bigPicture, int quality, int bitrateKbps, int fps) {
+                 int maxHeight, bool hevc, bool audio, bool bigPicture, int quality, int bitrateKbps, int fps,
+                 bool hdr) {
     StreamParams params;
     params.ip = ip;
     params.steamId = std::strtoull(steamId.c_str(), nullptr, 10);
@@ -596,7 +599,9 @@ bool StartStream(const std::string &ip, const std::string &steamId, const std::s
     params.request.maxWidth = maxWidth;
     params.request.maxHeight = maxHeight;
     params.request.interface = bigPicture ? IHS_StreamInterfaceBigPicture : IHS_StreamInterfaceDefault;
-    params.options.hevc = hevc;
+    params.request.hdr = hdr;
+    params.options.hevc = hevc || hdr;
+    params.options.hdr = hdr;
     params.options.audio = audio;
     params.options.quality = quality;
     params.options.bitrateKbps = bitrateKbps;
@@ -632,6 +637,7 @@ int main() {
     // the first, and dropped about 17% of H.264 frames. So Tizen 9 and later get low latency,
     // and Game Mode comes from the use.game.mode metadata in config.xml instead, as in Moonlight
     // for Tizen. HEVC gets low latency on every version, since nothing older was tried with it.
+    // The codec setting: false for H.264, true for HEVC, 'hdr' for HEVC with HDR.
     bool hevc = EM_ASM_INT({
         try {
             return JSON.parse(localStorage.getItem('tsl.settings') || '{}').hevc ? 1 : 0;

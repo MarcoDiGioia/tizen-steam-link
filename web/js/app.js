@@ -21,6 +21,10 @@
 
     var QUALITIES = {'-1': 'Automatic', 1: 'Fast', 2: 'Balanced', 3: 'Beautiful'};
 
+    function codecText(v) {
+        return v === 'hdr' ? 'HEVC HDR' : v ? 'HEVC' : 'H.264';
+    }
+
     function bandwidthText(kbps) {
         return kbps < 0 ? 'Automatic' : kbps / 1000 + ' Mbit/s';
     }
@@ -30,8 +34,8 @@
             text: function (v) { return RESOLUTIONS[v].label; }},
         {key: 'framerate', label: 'Frame rate', values: [60, 120],
             text: function (v) { return v + ' fps'; }},
-        {key: 'hevc', label: 'Video codec', values: [false, true],
-            text: function (v) { return v ? 'HEVC' : 'H.264'; }},
+        // 'hdr' is HEVC with HDR10 offered: HDR only comes as HEVC.
+        {key: 'hevc', label: 'Video codec', values: [false, true, 'hdr'], text: codecText},
         {key: 'quality', label: 'Quality', values: [-1, 1, 2, 3],
             text: function (v) { return QUALITIES[v]; }},
         {key: 'bandwidth', label: 'Bandwidth limit', values: [-1, 5000, 10000, 15000, 20000, 30000, 50000, 75000, 100000],
@@ -345,7 +349,7 @@
     function settingsSummary() {
         var res = RESOLUTIONS[state.settings.resolution] || RESOLUTIONS[1];
         return 'Up to ' + res.label + (state.settings.framerate > 60 ? ' at ' + state.settings.framerate + ' fps' : '') +
-            '  ·  ' + (state.settings.hevc ? 'HEVC' : 'H.264') + '  ·  ' +
+            '  ·  ' + codecText(state.settings.hevc) + '  ·  ' +
             QUALITIES[state.settings.quality] + ', ' + bandwidthText(state.settings.bandwidth) + '  ·  audio ' +
             (state.settings.audio ? 'on' : 'off') + '  ·  opens ' +
             (state.settings.bigPicture ? 'Big Picture' : 'the desktop');
@@ -705,7 +709,8 @@
         showStreamStatus('Starting the stream…');
         var ok = mod.startStream(host.ip, String(host.steamId || ''), host.key, res.w, res.h,
             !!state.settings.hevc, !!state.settings.audio, !!state.settings.bigPicture,
-            Number(state.settings.quality), Number(state.settings.bandwidth), Number(state.settings.framerate));
+            Number(state.settings.quality), Number(state.settings.bandwidth), Number(state.settings.framerate),
+            state.settings.hevc === 'hdr');
         if (!ok) streamFailed('Could not contact ' + host.hostname + '.');
     }
 
@@ -806,7 +811,8 @@
             var dt = (now - s.last.time) / 1000;
             var fps = (st.videoFrames - s.last.videoFrames) / dt;
             var mbps = (st.videoBytes - s.last.videoBytes) * 8 / dt / 1e6;
-            text = st.width + 'x' + st.height + ' ' + (st.videoCodec === 5 ? 'HEVC' : 'H.264') + '\n' +
+            text = st.width + 'x' + st.height + ' ' + (st.videoCodec === 5 ? 'HEVC' : 'H.264') +
+                (st.colorspace === 5 ? ' HDR' : '') + '\n' +
                 fps.toFixed(0) + ' fps   ' + mbps.toFixed(1) + ' Mbit/s\n' +
                 'target ' + (st.targetBitrate / 1000).toFixed(1) + ' Mbit/s' +  // Steam sends kbit/s
                 (st.framerateDen ? ' @ ' + (st.framerateNum / st.framerateDen).toFixed(0) + ' fps' : '') + '\n' +

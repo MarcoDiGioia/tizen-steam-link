@@ -53,6 +53,8 @@ public:
     ~Player() override;
 
     void SetHevcSupported(bool supported) { hevc_ = supported; }
+    // Before the first VideoStart: HDR was asked for, so HEVC gets the 10-bit profile.
+    void SetHdr(bool hdr) { hdr_ = hdr; }
     void SetAudioEnabled(bool enabled) { audioEnabled_ = enabled; }
     // Before the first VideoStart: the video track takes it when it opens.
     void SetFramerate(uint32_t fps) { fps_ = fps > 0 ? fps : 60; }
@@ -106,6 +108,7 @@ private:
     void FillSilenceIfStarved();
 
     std::atomic<bool> hevc_{false};
+    std::atomic<bool> hdr_{false};
     std::atomic<bool> audioEnabled_{true};
 
     std::mutex mutex_;

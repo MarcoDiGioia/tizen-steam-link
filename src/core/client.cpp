@@ -168,6 +168,7 @@ bool Client::RequestStream(const Host &host, const StreamRequest &request, const
     req.maxResolution.y = request.maxHeight;
     req.audioChannelCount = request.audioChannels;
     req.streamingInterface = request.interface;
+    req.displayHdr = request.hdr;
     return IHS_ClientStreamingRequest(client_, &host.info, &req);
 }
 
