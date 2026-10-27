@@ -86,9 +86,12 @@ The Player latency setting overrides this: Low uses the low latency mode, and Ul
 ultra low latency mode for H.264 where the TV has it. HEVC always gets the low latency mode,
 since on a Samsung QN90D TV on Tizen 9 the ultra low latency mode froze it on its first frame,
 with or without HDR, as on the monitor. H.264 plays in the ultra low latency mode on that TV.
+On TVs from before 2022, which don't read `use.game.mode`, the ultra low latency mode is what
+turns Game Mode on, so Low leaves it off.
 
-The player takes its mode when it starts, so the page reloads when the codec setting changes.
-It also reloads after every stream, which gives each stream a fresh player.
+The player takes its mode when it starts, so the page reloads when the codec or the Player
+latency setting changes. It also reloads after every stream, which gives each stream a fresh
+player.
 
 On a Samsung S90C, whose panel runs at 144 Hz, the app showed at most about 60 frames per
 second. A 120 fps stream was decoded in full, and about half its frames were dropped.
