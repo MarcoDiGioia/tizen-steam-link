@@ -642,8 +642,8 @@ int main() {
     // The codec setting: false for H.264, true for HEVC, 'hdr' for HEVC with HDR.
     //
     // The latency setting overrides that rule: 1 is low, 2 ultra low (where the TV has it). On a
-    // QN90D TV (Tizen 9) a test app played H.264 in ultra low latency, so the M7's problems may
-    // not apply to every TV.
+    // QN90D TV (Tizen 9) H.264 plays in ultra low latency, but HEVC, with or without HDR, freezes
+    // on its first frame as on the M7, so HEVC always gets low latency.
     bool hevc = EM_ASM_INT({
         try {
             return JSON.parse(localStorage.getItem('tsl.settings') || '{}').hevc ? 1 : 0;
@@ -668,7 +668,7 @@ int main() {
     });
     // Older TVs may lack the ultra low latency mode altogether.
     bool hasUltraLow = samsung::wasm::EmssVersionInfo::Create().has_ultra_low_latency;
-    bool ultraLow = latency == 0 ? tizenVersion < 9 && !hevc && hasUltraLow : latency == 2 && hasUltraLow;
+    bool ultraLow = latency == 0 ? tizenVersion < 9 && !hevc && hasUltraLow : latency == 2 && !hevc && hasUltraLow;
     tsl::Log(IHS_LogLevelInfo, "Player", "%s latency mode (Tizen %d, codec setting %s, latency setting %s)",
              ultraLow ? "Ultra low" : "Low", tizenVersion, hevc ? "HEVC" : "H.264",
              latency == 1 ? "low" : latency == 2 ? "ultra low" : "automatic");
