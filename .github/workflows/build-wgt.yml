@@ -1,0 +1,43 @@
+name: Build TV package
+
+# Builds TizenSteamLink.wgt for testing on a TV, on every push outside master
+# and on demand, and keeps it as a workflow artifact. Releases stay with the
+# release workflow.
+on:
+  push:
+    branches-ignore: [master]
+  workflow_dispatch:
+
+jobs:
+  wgt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Runner user
+        id: user
+        run: |
+          echo "uid=$(id -u)" >> "$GITHUB_OUTPUT"
+          echo "gid=$(id -g)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          load: true
+          tags: tizen-steam-link-toolchain
+          build-args: |
+            UID=${{ steps.user.outputs.uid }}
+            GID=${{ steps.user.outputs.gid }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build the TV app
+        run: scripts/build-tizen.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TizenSteamLink-${{ github.run_number }}
+          path: out/TizenSteamLink.wgt
