@@ -68,6 +68,8 @@ bool Session::Connect() {
     return started_;
 }
 
+void Session::Quit() { IHS_SessionSendQuitRequest(session_); }
+
 void Session::Disconnect() { IHS_SessionDisconnect(session_); }
 
 void Session::Join() {

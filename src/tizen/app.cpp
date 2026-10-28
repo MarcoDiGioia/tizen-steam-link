@@ -220,14 +220,21 @@ public:
         return client_->Probe(params.ip);
     }
 
-    void StopStream() {
+    void StopStream(bool quit) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pendingStream_.reset();
             streamRequested_ = false;
         }
-        worker_.Post([this] {
-            if (auto session = CurrentSession()) session->Disconnect();
+        worker_.Post([this, quit] {
+            auto session = CurrentSession();
+            if (!session) return;
+            if (quit) {
+                session->Quit();
+                // Give the request time to reach Steam (and be resent if lost) before disconnecting.
+                usleep(500 * 1000);
+            }
+            session->Disconnect();
         });
     }
 
@@ -613,7 +620,7 @@ bool StartStream(const std::string &ip, const std::string &steamId, const std::s
     return g_app->StartStream(params);
 }
 
-void StopStream() { g_app->StopStream(); }
+void StopStream(bool quit) { g_app->StopStream(quit); }
 void Key(const std::string &code, bool down) { g_app->Key(code, down); }
 void SendText(const std::string &text) { g_app->SendText(text); }
 void SetPadInput(bool enabled) { g_app->SetPadInput(enabled); }

@@ -1,0 +1,38 @@
+Add IHS_SessionSendQuitRequest.
+
+Steam's control channel has a QuitRequest message besides the Disconnect that ends a session.
+The client can send it before disconnecting, to ask the host to quit instead of leaving the
+stream (and the game) ready to resume.
+
+diff -ruN a/include/ihslib/session.h b/include/ihslib/session.h
+--- a/include/ihslib/session.h	2026-10-28 16:34:58.924339794 +0000
++++ b/include/ihslib/session.h	2026-10-28 16:35:11.824624014 +0000
+@@ -113,6 +113,13 @@
+ void IHS_SessionDisconnect(IHS_Session *session);
+ 
+ /**
++ * Ask the host to quit, sent before IHS_SessionDisconnect when the stream should not be resumed
++ * @param session Session instance
++ * @return Whether the request was queued
++ */
++bool IHS_SessionSendQuitRequest(IHS_Session *session);
++
++/**
+  * Wait for all threads to finish
+  * @param session Session instance
+  */
+diff -ruN a/src/session/session.c b/src/session/session.c
+--- a/src/session/session.c	2026-10-28 16:34:58.926441532 +0000
++++ b/src/session/session.c	2026-10-28 16:35:11.824731929 +0000
+@@ -186,6 +186,11 @@
+     return IHS_SessionChannelControlSend(channel, type, message, IHS_PACKET_ID_NEXT);
+ }
+ 
++bool IHS_SessionSendQuitRequest(IHS_Session *session) {
++    CQuitRequest request = CQUIT_REQUEST__INIT;
++    return IHS_SessionSendControlMessage(session, k_EStreamControlQuitRequest, (const ProtobufCMessage *) &request);
++}
++
+ bool IHS_SessionCancelRetransmission(IHS_Session *session, IHS_SessionChannelId channelId, uint16_t packetId,
+                                      uint16_t fragmentId) {
+     return IHS_RetransmissionCancel(&session->retransmission, channelId, packetId, fragmentId);

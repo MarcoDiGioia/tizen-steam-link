@@ -50,12 +50,14 @@
             text: function (v) { return v ? 'Big Picture' : 'Desktop'; }},
         {key: 'stats', label: 'Show stream statistics', values: [false, true], kind: 'switch',
             text: function (v) { return v ? 'Shown' : 'Hidden'; }},
+        {key: 'quitOnLeave', label: 'When leaving', values: [false, true],
+            text: function (v) { return v ? 'Quit the game' : 'Keep the game running'; }},
     ];
 
     // 20 Mbit/s, Moonlight's default for 1080p at 60 fps: on Wi-Fi a lower limit means smaller
     // keyframes, so fewer packets to lose. Big Picture, as in Steam's own Steam Link app.
     var DEFAULT_SETTINGS = {resolution: 1, framerate: 60, hevc: false, latency: 0, quality: 2, bandwidth: 20000,
-        audio: true, bigPicture: true, stats: false};
+        audio: true, bigPicture: true, stats: false, quitOnLeave: false};
     var ONLINE_MS = 9000;
     var PAIR_TIMEOUT_MS = 120000;
     var CONNECT_TIMEOUT_MS = 30000;
@@ -753,7 +755,8 @@
 
     // Once a session exists the player stays bound to it, so the page is reloaded
     // after the session has ended.
-    function endStream(message) {
+    // quit asks Steam to quit as well, for when the user leaves on purpose.
+    function endStream(message, quit) {
         var s = state.stream;
         if (!s || s.ending) return;
         s.ending = true;
@@ -764,7 +767,7 @@
             } catch (e) { /* not important */ }
         }
         showStreamStatus('Disconnecting…');
-        if (mod) mod.stopStream();
+        if (mod) mod.stopStream(!!quit);
         // If the session never comes back with streamEnded, reload anyway.
         setTimeout(reloadPage, 6000);
     }
@@ -844,7 +847,7 @@
         note('WARN [Stream] ' + stalled);
         console.warn('[Stream] ' + stalled);
         try {
-            mod.stopStream();
+            mod.stopStream(false);
         } catch (e) { /* reloading ends it anyway */ }
         connectionLost(s, true, 'The stream stopped, reconnecting…');
     }
@@ -929,7 +932,7 @@
                 openTextDialog();
             } else if (action === 'leave') {
                 closeStreamDialogs();
-                endStream();
+                endStream(undefined, state.settings.quitOnLeave);
             } else {
                 closeStreamDialogs();
             }
@@ -984,7 +987,7 @@
         });
         document.addEventListener('visibilitychange', function () {
             // The TV's Home button hides the app; don't keep a stream running in the background.
-            if (document.hidden && state.stream) endStream();
+            if (document.hidden && state.stream) endStream(undefined, state.settings.quitOnLeave);
         });
     }
 

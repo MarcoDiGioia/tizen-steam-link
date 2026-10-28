@@ -89,6 +89,7 @@ typed it there. Steam's own on-screen keyboard in Big Picture works too.
 | Audio | On, off | On | |
 | Start in | Big Picture, Desktop | Big Picture | |
 | Show stream statistics | Shown, hidden | Hidden | Same as the red key during a stream. |
+| When leaving | Keep the game running, Quit the game | Keep the game running | What leaving the stream from its menu, or with the TV's Home button, asks of Steam. Quit the game sends Steam's quit request before disconnecting. |
 
 Changes apply to the next stream.
 

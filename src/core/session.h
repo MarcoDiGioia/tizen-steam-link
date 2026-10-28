@@ -101,6 +101,8 @@ public:
     Session &operator=(const Session &) = delete;
 
     bool Connect();
+    // Asks Steam to quit instead of keeping the stream ready to resume. Send before Disconnect().
+    void Quit();
     void Disconnect();
     void Join();
 
